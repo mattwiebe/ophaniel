@@ -1,0 +1,10 @@
+{
+  "name": "mattwiebe/ophaniel",
+  "description": "Local voice-note transcription pipeline (Lightning Whisper + LM Studio metadata)",
+  "type": "project",
+  "require": {
+    "php": "^8.3",
+    "ext-json": "*",
+    "rmccue/requests": "^2.0"
+  }
+}
