@@ -51,22 +51,24 @@ If you want a different config file location:
 
 ## Commands
 
-Run from this directory (`/Users/matt/bin/transcribe`) or call with absolute paths.
+Preferred: run via Composer scripts from this directory (`/Users/matt/bin/transcribe`).
 
 - Run once:
-  - `php voice-pipeline.php run-once`
+  - `composer run run-once`
 - Run once silently (for LaunchAgent/automation):
-  - `php voice-pipeline.php run-once --quiet`
+  - `composer run run-once:quiet`
 - Daemon loop:
-  - `php voice-pipeline.php daemon 30`
-- Process one file:
-  - `php voice-pipeline.php process-file "/absolute/path/to/file.m4a"`
-- Re-transcribe existing vault notes in place:
-  - `php voice-pipeline.php retranscribe-vault "/path/to/vault/subdir-or-note.md"`
+  - `composer run daemon`
 - Status:
-  - `php voice-pipeline.php status`
-- No-copy test transcription:
-  - `php voice-pipeline.php test-file "/path/to/file.m4a" /tmp/transcribe-tests`
+  - `composer run pipeline-status`
+- Run tests:
+  - `composer run test`
+
+Direct CLI remains available:
+
+- `php voice-pipeline.php process-file "/absolute/path/to/file.m4a"`
+- `php voice-pipeline.php retranscribe-vault "/path/to/vault/subdir-or-note.md"`
+- `php voice-pipeline.php test-file "/path/to/file.m4a" /tmp/transcribe-tests`
 
 ## Behavior Notes
 

@@ -52,7 +52,20 @@ define('LMSTUDIO_BASE_URL', cfg_string($bootConfig, 'LMSTUDIO_BASE_URL', 'http:/
 define('LMSTUDIO_API_KEY', cfg_string($bootConfig, 'LMSTUDIO_API_KEY', 'lm-studio'));
 define('LMSTUDIO_TIMEOUT_SECONDS', max(10, cfg_int($bootConfig, 'LMSTUDIO_TIMEOUT_SECONDS', 120)));
 
-main($argv);
+if (!defined('OPHANIEL_DISABLE_MAIN') && should_run_main()) {
+    main($argv);
+}
+
+function should_run_main(): bool {
+    if (PHP_SAPI !== 'cli') {
+        return false;
+    }
+    $script = $_SERVER['SCRIPT_FILENAME'] ?? '';
+    if (!is_string($script) || $script === '') {
+        return false;
+    }
+    return realpath($script) === __FILE__;
+}
 
 function main(array $argv): void {
     date_default_timezone_set(trim((string) shell_exec("/bin/ls -l /etc/localtime | /usr/bin/cut -d '/' -f 8,9")) ?: date_default_timezone_get());

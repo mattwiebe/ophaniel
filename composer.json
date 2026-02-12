@@ -2,9 +2,22 @@
   "name": "mattwiebe/ophaniel",
   "description": "Local voice-note transcription pipeline (Lightning Whisper + LM Studio metadata)",
   "type": "project",
+  "scripts": {
+    "run-once": "php voice-pipeline.php run-once",
+    "run-once:quiet": "php voice-pipeline.php run-once --quiet",
+    "pipeline-status": "php voice-pipeline.php status",
+    "daemon": "php voice-pipeline.php daemon 30",
+    "retranscribe-vault": "php voice-pipeline.php retranscribe-vault",
+    "test-file": "php voice-pipeline.php test-file",
+    "test-llm": "php voice-pipeline.php test-llm",
+    "test": "phpunit --colors=always"
+  },
   "require": {
     "php": "^8.3",
     "ext-json": "*",
     "rmccue/requests": "^2.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.5"
   }
 }
