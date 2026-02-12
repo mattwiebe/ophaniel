@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.matt.voice-pipeline</string>
+  <string>com.mattwiebe.ophaniel</string>
 
   <key>ProgramArguments</key>
   <array>

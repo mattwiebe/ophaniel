@@ -1,6 +1,8 @@
-# Voice Pipeline
+# Ophaniel
 
-Local transcription pipeline for voice notes -> Markdown notes in Obsidian.
+Automatic local transcription pipeline for voice notes -> Markdown notes in Obsidian.
+
+Any time a new audio file appears, it is automatically transcribed and moved to your Obsidian vault (or any target directory on your filesystem).
 
 - Transcription backend: Lightning Whisper MLX (`distil-large-v3`)
 - Metadata backend: OpenAI-compatible LM Studio API via `rmccue/requests`
