@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+MSG_FILE="${1:-}"
+if [ -z "${MSG_FILE}" ] || [ ! -f "${MSG_FILE}" ]; then
+  exit 0
+fi
+
+# Do not duplicate prompt blocks.
+if grep -q '^PROMPT:' "${MSG_FILE}"; then
+  exit 0
+fi
+
+PROMPT_TEXT="${OPHANIEL_PROMPT:-}"
+if [ -z "${PROMPT_TEXT}" ] && [ -f ".git/OPHANIEL_PROMPT" ]; then
+  PROMPT_TEXT="$(cat .git/OPHANIEL_PROMPT)"
+fi
+
+if [ -z "${PROMPT_TEXT}" ]; then
+  exit 0
+fi
+
+{
+  printf '\nPROMPT:\n'
+  printf '%s\n' "${PROMPT_TEXT}"
+} >> "${MSG_FILE}"
+

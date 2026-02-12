@@ -68,6 +68,33 @@ Run from this directory (`/Users/matt/bin/transcribe`) or call with absolute pat
 - No-copy test transcription:
   - `php voice-pipeline.php test-file "/path/to/file.m4a" /tmp/transcribe-tests`
 
+## Commit Prompt Hook
+
+This repo includes tracked Git hooks that append your prompt to commit messages under:
+
+```text
+PROMPT:
+...
+```
+
+Enable hooks (one-time per clone):
+
+- `git config core.hooksPath .githooks`
+
+Commit with prompt context:
+
+- `OPHANIEL_PROMPT="retranscribe january notes and tune paragraphing" git commit -m "Improve note formatting"`
+
+Alternative prompt source:
+
+- Put prompt text in `.git/OPHANIEL_PROMPT` before committing.
+
+Safety checks:
+
+- Commit is blocked if the prompt looks like a secret or clearly abusive language.
+- Override only when intentional:
+  - `OPHANIEL_ALLOW_RISKY_PROMPT=1 git commit ...`
+
 ## Behavior Notes
 
 - Sequential processing (one file at a time)

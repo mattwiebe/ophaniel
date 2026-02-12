@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+MSG_FILE="${1:-}"
+if [ -z "${MSG_FILE}" ] || [ ! -f "${MSG_FILE}" ]; then
+  exit 0
+fi
+
+PROMPT_BLOCK="$(awk 'f{print} /^PROMPT:/{f=1; next}' "${MSG_FILE}")"
+if [ -z "${PROMPT_BLOCK}" ]; then
+  exit 0
+fi
+
+if [ "${OPHANIEL_ALLOW_RISKY_PROMPT:-0}" = "1" ]; then
+  exit 0
+fi
+
+SECRET_PATTERNS='(AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|Bearer [A-Za-z0-9._-]{20,})'
+ABUSE_PATTERNS='(\basshole\b|\bidiot\b|\bmoron\b|\bstupid\b|fuck you|piece of shit)'
+
+if printf '%s\n' "${PROMPT_BLOCK}" | grep -Eiq "${SECRET_PATTERNS}"; then
+  echo "Blocked: prompt appears to contain a potential secret."
+  echo "Review and redact before committing."
+  echo "If intentional, re-run with OPHANIEL_ALLOW_RISKY_PROMPT=1."
+  exit 1
+fi
+
+if printf '%s\n' "${PROMPT_BLOCK}" | grep -Eiq "${ABUSE_PATTERNS}"; then
+  echo "Blocked: prompt appears to contain hostile/abusive language."
+  echo "Please revise tone if this is unintentional."
+  echo "If intentional, re-run with OPHANIEL_ALLOW_RISKY_PROMPT=1."
+  exit 1
+fi
+
+exit 0
+
