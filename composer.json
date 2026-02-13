@@ -5,7 +5,7 @@
   "scripts": {
     "ingest": "php ophaniel.php ingest",
     "ingest:quiet": "php ophaniel.php ingest --quiet",
-    "status": "php ophaniel.php status",
+    "state": "php ophaniel.php status",
     "daemon": "php ophaniel.php daemon 30",
     "launchagent": "php scripts/launchagent.php",
     "launchagent:add": "php scripts/launchagent.php add",

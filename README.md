@@ -60,7 +60,7 @@ Preferred: run via Composer scripts from this directory (`/Users/matt/bin/transc
 - Daemon loop:
   - `composer run daemon`
 - Status:
-  - `composer run status`
+  - `composer run state`
 - Run tests:
   - `composer run test`
 
