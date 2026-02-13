@@ -1,8 +1,8 @@
 config.ini
-.voice-pipeline-state.json
-.voice-pipeline.lock
-voice-pipeline.log
-voice-pipeline.stdout.log
-voice-pipeline.stderr.log
+.ophaniel-state.json
+.ophaniel.lock
+ophaniel.log
+ophaniel.stdout.log
+ophaniel.stderr.log
 mlx_models/
 vendor/

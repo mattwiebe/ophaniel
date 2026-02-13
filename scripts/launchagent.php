@@ -36,6 +36,11 @@ function main(array $argv): void {
             echo "Reloaded {$ctx['label']}\n";
             return;
 
+        case 'kick':
+            run("launchctl kickstart -k gui/{$ctx['uid']}/{$ctx['label']}");
+            echo "Kicked {$ctx['label']}\n";
+            return;
+
         case 'status':
             run("launchctl print gui/{$ctx['uid']}/{$ctx['label']}", false);
             return;
@@ -46,7 +51,7 @@ function main(array $argv): void {
 
         case 'help':
         default:
-            echo "Usage: composer run launchagent -- <add|load|unload|reload|status|path>\n";
+            echo "Usage: composer run launchagent -- <add|load|unload|reload|kick|status|path>\n";
             echo "Env overrides:\n";
             echo "  OPHANIEL_LAUNCHAGENT_LABEL (default: com.mattwiebe.ophaniel)\n";
             echo "  OPHANIEL_LAUNCHAGENT_INTERVAL (default: 300)\n";
@@ -82,9 +87,9 @@ function build_context(): array {
         'hf_home' => $home . '/.cache/huggingface',
         'working_dir' => $root,
         'php_bin' => PHP_BINARY,
-        'pipeline_bin' => $root . '/voice-pipeline.php',
-        'stdout' => $root . '/voice-pipeline.stdout.log',
-        'stderr' => $root . '/voice-pipeline.stderr.log',
+        'pipeline_bin' => $root . '/ophaniel.php',
+        'stdout' => $root . '/ophaniel.stdout.log',
+        'stderr' => $root . '/ophaniel.stderr.log',
         'launch_agents_dir' => $home . '/Library/LaunchAgents',
         'template' => $root . '/launchagent.template.plist',
     ];

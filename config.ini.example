@@ -1,4 +1,4 @@
-; Voice Pipeline configuration
+; Ophaniel configuration
 ; Copy this file to config.ini and adjust paths for your machine.
 
 ; Core paths
@@ -8,9 +8,9 @@ TARGET_DIRECTORY = "/Users/you/Library/Mobile Documents/iCloud~md~obsidian/Docum
 TARGET_AUDIO_DIRECTORY = ""
 
 ; Optional state/log paths
-STATE_FILE = "/Users/you/bin/transcribe/.voice-pipeline-state.json"
-LOCK_FILE = "/Users/you/bin/transcribe/.voice-pipeline.lock"
-LOG_FILE = "/Users/you/bin/transcribe/voice-pipeline.log"
+STATE_FILE = "/Users/you/bin/transcribe/.ophaniel-state.json"
+LOCK_FILE = "/Users/you/bin/transcribe/.ophaniel.lock"
+LOG_FILE = "/Users/you/bin/transcribe/ophaniel.log"
 ; Optional: leave blank to default to SOURCE_DIRECTORY + "/.processed"
 LEGACY_PROCESSED_FILE = ""
 
@@ -23,7 +23,7 @@ LIGHTNING_LANGUAGE = "en"
 
 ; Pipeline behavior
 FILE_SETTLE_SECONDS = 20
-TEST_OUTPUT_ROOT = "/tmp/transcribe-tests"
+TEST_OUTPUT_ROOT = "/tmp/ophaniel-tests"
 FFPROBE_COMMAND = "/opt/homebrew/bin/ffprobe"
 FFMPEG_COMMAND = "/opt/homebrew/bin/ffmpeg"
 HYDRATE_WAIT_SECONDS = 20

@@ -24,7 +24,7 @@ Install PHP dependencies:
 
 ## Configuration
 
-Configuration is loaded from `config.ini` (default path: same directory as `voice-pipeline.php`).
+Configuration is loaded from `config.ini` (default path: same directory as `ophaniel.php`).
 
 1. Copy:
    - `cp config.ini.example config.ini`
@@ -42,33 +42,33 @@ Optional path behavior:
 Environment variables override `config.ini` keys one-for-one.
 Example:
 
-- `SOURCE_DIRECTORY=/some/other/path php voice-pipeline.php run-once`
-- `LLM_MODEL=lmstudio/another-model php voice-pipeline.php test-llm /tmp/input.txt`
+- `SOURCE_DIRECTORY=/some/other/path php ophaniel.php run-once`
+- `LLM_MODEL=lmstudio/another-model php ophaniel.php test-llm /tmp/input.txt`
 
 If you want a different config file location:
 
-- `VOICE_PIPELINE_CONFIG=/path/to/config.ini php voice-pipeline.php run-once`
+- `OPHANIEL_CONFIG=/path/to/config.ini php ophaniel.php run-once`
 
 ## Commands
 
 Preferred: run via Composer scripts from this directory (`/Users/matt/bin/transcribe`).
 
 - Run once:
-  - `composer run run-once`
+  - `composer run ingest`
 - Run once silently (for LaunchAgent/automation):
-  - `composer run run-once:quiet`
+  - `composer run ingest:quiet`
 - Daemon loop:
   - `composer run daemon`
 - Status:
-  - `composer run pipeline-status`
+  - `composer run status`
 - Run tests:
   - `composer run test`
 
 Direct CLI remains available:
 
-- `php voice-pipeline.php process-file "/absolute/path/to/file.m4a"`
-- `php voice-pipeline.php retranscribe-vault "/path/to/vault/subdir-or-note.md"`
-- `php voice-pipeline.php test-file "/path/to/file.m4a" /tmp/transcribe-tests`
+- `php ophaniel.php process-file "/absolute/path/to/file.m4a"`
+- `php ophaniel.php retranscribe-vault "/path/to/vault/subdir-or-note.md"`
+- `php ophaniel.php test-file "/path/to/file.m4a" /tmp/ophaniel-tests`
 
 ## Behavior Notes
 
@@ -92,12 +92,14 @@ Generate and manage the LaunchAgent from Composer so install paths are not hardc
   - `composer run launchagent:unload`
 - Reload:
   - `composer run launchagent:reload`
+- Force one immediate run:
+  - `composer run launchagent:kick`
 - Status:
   - `composer run launchagent:status`
 
 Generic command form:
 
-- `composer run launchagent -- <add|load|unload|reload|status|path>`
+- `composer run launchagent -- <add|load|unload|reload|kick|status|path>`
 
 Optional env overrides:
 

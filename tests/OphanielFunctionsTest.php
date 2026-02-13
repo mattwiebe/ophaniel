@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
-final class VoicePipelineFunctionsTest extends TestCase {
+final class OphanielFunctionsTest extends TestCase {
     public function testParseLlmMetadataJsonParsesFencedJson(): void {
         $raw = "```json\n{\"title\":\"14 Weekly review\",\"summary\":\"Short summary.\"}\n```";
         $parsed = parse_llm_metadata_json($raw);

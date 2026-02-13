@@ -7,13 +7,13 @@ declare(strict_types=1);
  * Robust local voice-note pipeline for Just Press Record -> Obsidian.
  *
  * Usage:
- *   /Users/matt/bin/transcribe/voice-pipeline.php run-once [--quiet|-q]
- *   /Users/matt/bin/transcribe/voice-pipeline.php daemon [seconds] [--quiet|-q]
- *   /Users/matt/bin/transcribe/voice-pipeline.php process-file /absolute/path/to/file.m4a [--quiet|-q]
- *   /Users/matt/bin/transcribe/voice-pipeline.php retranscribe-vault [/absolute/path/to/vault/subdir-or-md] [--quiet|-q]
- *   /Users/matt/bin/transcribe/voice-pipeline.php test-file /absolute/path/to/file.m4a [/tmp/outdir] [offset_ms] [duration_ms]
- *   /Users/matt/bin/transcribe/voice-pipeline.php test-llm /absolute/path/to/textfile
- *   /Users/matt/bin/transcribe/voice-pipeline.php status
+ *   /Users/matt/bin/transcribe/ophaniel.php run-once [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php daemon [seconds] [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php process-file /absolute/path/to/file.m4a [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php retranscribe-vault [/absolute/path/to/vault/subdir-or-md] [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php test-file /absolute/path/to/file.m4a [/tmp/outdir] [offset_ms] [duration_ms]
+ *   /Users/matt/bin/transcribe/ophaniel.php test-llm /absolute/path/to/textfile
+ *   /Users/matt/bin/transcribe/ophaniel.php status
  */
 
 $bootConfig = load_ini_config();
@@ -32,9 +32,9 @@ define('SOURCE_DIRECTORY', $sourceDir);
 define('TARGET_DIRECTORY', $targetDir);
 define('TARGET_AUDIO_DIRECTORY', $targetAudioDir);
 
-define('STATE_FILE', cfg_string($bootConfig, 'STATE_FILE', __DIR__ . '/.voice-pipeline-state.json'));
-define('LOCK_FILE', cfg_string($bootConfig, 'LOCK_FILE', __DIR__ . '/.voice-pipeline.lock'));
-define('LOG_FILE', cfg_string($bootConfig, 'LOG_FILE', __DIR__ . '/voice-pipeline.log'));
+define('STATE_FILE', cfg_string($bootConfig, 'STATE_FILE', __DIR__ . '/.ophaniel-state.json'));
+define('LOCK_FILE', cfg_string($bootConfig, 'LOCK_FILE', __DIR__ . '/.ophaniel.lock'));
+define('LOG_FILE', cfg_string($bootConfig, 'LOG_FILE', __DIR__ . '/ophaniel.log'));
 define('LEGACY_PROCESSED_FILE', cfg_string($bootConfig, 'LEGACY_PROCESSED_FILE', SOURCE_DIRECTORY . '/.processed'));
 
 define('LIGHTNING_UV_COMMAND', cfg_string($bootConfig, 'LIGHTNING_UV_COMMAND', '/opt/homebrew/bin/uv'));
@@ -48,7 +48,7 @@ define('MAX_FILES_PER_RUN', max(1, cfg_int($bootConfig, 'MAX_FILES_PER_RUN', 3))
 define('ERROR_RETRY_SECONDS', max(60, cfg_int($bootConfig, 'ERROR_RETRY_SECONDS', 3600)));
 define('ERROR_MAX_ATTEMPTS', max(1, cfg_int($bootConfig, 'ERROR_MAX_ATTEMPTS', 3)));
 define('REPROCESS_ON_SOURCE_CHANGE', cfg_bool($bootConfig, 'REPROCESS_ON_SOURCE_CHANGE', false));
-define('TEST_OUTPUT_ROOT', cfg_string($bootConfig, 'TEST_OUTPUT_ROOT', '/tmp/transcribe-tests'));
+define('TEST_OUTPUT_ROOT', cfg_string($bootConfig, 'TEST_OUTPUT_ROOT', '/tmp/ophaniel-tests'));
 
 define('ENABLE_LLM_SUMMARY', cfg_bool($bootConfig, 'ENABLE_LLM_SUMMARY', true));
 define('LLM_MODEL', cfg_string($bootConfig, 'LLM_MODEL', 'lmstudio/qwen3-4b-instruct-2507-mlx'));
@@ -674,7 +674,7 @@ function run_transcription_backend(string $audioFile, string $outputBase, int $o
 }
 
 function run_lightning_whisper(string $audioFile, string $outputBase, int $offsetMs = 0, int $durationMs = 0): void {
-    $batchSize = max(1, (int)(getenv('VOICE_PIPELINE_LIGHTNING_BATCH_SIZE') ?: LIGHTNING_BATCH_SIZE));
+    $batchSize = max(1, (int)(getenv('OPHANIEL_LIGHTNING_BATCH_SIZE') ?: LIGHTNING_BATCH_SIZE));
     $parts = [
         escapeshellarg(LIGHTNING_UV_COMMAND),
         'run',
@@ -1276,7 +1276,7 @@ function cli_args_without_flags(array $argv): array {
     $out = [];
     foreach (array_slice($argv, 1) as $arg) {
         if ($arg === '--quiet' || $arg === '-q') {
-            $GLOBALS['voice_pipeline_quiet'] = true;
+            $GLOBALS['ophaniel_quiet'] = true;
             continue;
         }
         $out[] = (string)$arg;
@@ -1285,7 +1285,7 @@ function cli_args_without_flags(array $argv): array {
 }
 
 function cli_is_quiet(): bool {
-    return (bool)($GLOBALS['voice_pipeline_quiet'] ?? false);
+    return (bool)($GLOBALS['ophaniel_quiet'] ?? false);
 }
 
 function cli_out(string $message): void {
@@ -1676,7 +1676,7 @@ function log_line(string $event, array $ctx = []): void {
 }
 
 function load_ini_config(): array {
-    $path = trim((string)(getenv('VOICE_PIPELINE_CONFIG') ?: ''));
+    $path = trim((string)(getenv('OPHANIEL_CONFIG') ?: ''));
     if ($path === '') {
         $path = __DIR__ . '/config.ini';
     }
