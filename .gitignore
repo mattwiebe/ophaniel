@@ -2,4 +2,7 @@ config.ini
 .voice-pipeline-state.json
 .voice-pipeline.lock
 voice-pipeline.log
+voice-pipeline.stdout.log
+voice-pipeline.stderr.log
+mlx_models/
 vendor/
