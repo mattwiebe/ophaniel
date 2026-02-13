@@ -42,12 +42,12 @@ Optional path behavior:
 Environment variables override `config.ini` keys one-for-one.
 Example:
 
-- `SOURCE_DIRECTORY=/some/other/path php ophaniel.php run-once`
+- `SOURCE_DIRECTORY=/some/other/path php ophaniel.php ingest`
 - `LLM_MODEL=lmstudio/another-model php ophaniel.php test-llm /tmp/input.txt`
 
 If you want a different config file location:
 
-- `OPHANIEL_CONFIG=/path/to/config.ini php ophaniel.php run-once`
+- `OPHANIEL_CONFIG=/path/to/config.ini php ophaniel.php ingest`
 
 ## Commands
 
@@ -75,7 +75,7 @@ Direct CLI remains available:
 - Sequential processing (one file at a time)
 - Lock file prevents overlapping runs
 - JSON state tracks processed files by path + mtime + size
-- Progress output includes `n/total` for `run-once` and `retranscribe-vault`
+- Progress output includes `n/total` for `ingest` and `retranscribe-vault`
 - `--quiet` suppresses CLI progress output
 - Transcripts get heuristic paragraphization + repetition cleanup
 - Title + summary come from one LLM call (JSON response)

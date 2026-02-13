@@ -11,7 +11,7 @@
     <string>-d</string>
     <string>opcache.enable_cli=0</string>
     <string>{{PIPELINE_BIN}}</string>
-    <string>run-once</string>
+    <string>ingest</string>
     <string>--quiet</string>
   </array>
 

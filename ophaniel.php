@@ -7,7 +7,7 @@ declare(strict_types=1);
  * Robust local voice-note pipeline for Just Press Record -> Obsidian.
  *
  * Usage:
- *   /Users/matt/bin/transcribe/ophaniel.php run-once [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php ingest [--quiet|-q]
  *   /Users/matt/bin/transcribe/ophaniel.php daemon [seconds] [--quiet|-q]
  *   /Users/matt/bin/transcribe/ophaniel.php process-file /absolute/path/to/file.m4a [--quiet|-q]
  *   /Users/matt/bin/transcribe/ophaniel.php retranscribe-vault [/absolute/path/to/vault/subdir-or-md] [--quiet|-q]
@@ -82,7 +82,7 @@ function main(array $argv): void {
     ensure_runtime_environment();
 
     $args = cli_args_without_flags($argv);
-    $cmd = $args[0] ?? 'run-once';
+    $cmd = $args[0] ?? 'ingest';
 
     if ($cmd === 'test-file') {
         $file = trim((string)($args[1] ?? ''));
@@ -109,12 +109,12 @@ function main(array $argv): void {
 
     with_lock(function () use ($cmd, $args): void {
         ensure_directories();
-        if (in_array($cmd, ['run-once', 'daemon', 'process-file', 'retranscribe-vault'], true)) {
+        if (in_array($cmd, ['ingest', 'daemon', 'process-file', 'retranscribe-vault'], true)) {
             ensure_llm_metadata_preflight();
         }
         $state = load_state();
 
-        if ($cmd === 'run-once') {
+        if ($cmd === 'ingest') {
             run_once($state);
             save_state($state);
             return;

@@ -3,10 +3,8 @@
   "description": "Local voice-note transcription pipeline (Lightning Whisper + LM Studio metadata)",
   "type": "project",
   "scripts": {
-    "ingest": "php ophaniel.php run-once",
-    "ingest:quiet": "php ophaniel.php run-once --quiet",
-    "run-once": "@ingest",
-    "run-once:quiet": "@ingest:quiet",
+    "ingest": "php ophaniel.php ingest",
+    "ingest:quiet": "php ophaniel.php ingest --quiet",
     "status": "php ophaniel.php status",
     "daemon": "php ophaniel.php daemon 30",
     "launchagent": "php scripts/launchagent.php",
