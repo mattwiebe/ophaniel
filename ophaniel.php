@@ -10,7 +10,9 @@ declare(strict_types=1);
  *   /Users/matt/bin/transcribe/ophaniel.php ingest [--quiet|-q]
  *   /Users/matt/bin/transcribe/ophaniel.php daemon [seconds] [--quiet|-q]
  *   /Users/matt/bin/transcribe/ophaniel.php process-file /absolute/path/to/file.m4a [--quiet|-q]
- *   /Users/matt/bin/transcribe/ophaniel.php retranscribe-vault [/absolute/path/to/vault/subdir-or-md] [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php retranscribe-vault [/absolute/path1 [/absolute/path2 ...]] [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php repair-note-dates [/absolute/path1 [/absolute/path2 ...]] [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php retime-note-filenames [/absolute/path1 [/absolute/path2 ...]] [--dry-run] [--quiet|-q]
  *   /Users/matt/bin/transcribe/ophaniel.php test-file /absolute/path/to/file.m4a [/tmp/outdir] [offset_ms] [duration_ms]
  *   /Users/matt/bin/transcribe/ophaniel.php test-llm /absolute/path/to/textfile
  *   /Users/matt/bin/transcribe/ophaniel.php status
@@ -149,12 +151,57 @@ function main(array $argv): void {
         }
 
         if ($cmd === 'retranscribe-vault') {
-            $path = trim((string)($args[1] ?? TARGET_DIRECTORY));
-            if ($path === '') {
-                $path = TARGET_DIRECTORY;
+            $paths = retranscribe_paths_from_args($args);
+            $pathErrors = [];
+            foreach ($paths as $path) {
+                try {
+                    retranscribe_vault($path, $state);
+                } catch (Throwable $e) {
+                    $pathErrors[] = ['path' => $path, 'error' => $e->getMessage()];
+                    log_line('retranscribe_path_error', ['path' => $path, 'error' => $e->getMessage()]);
+                    cli_out("Retranscribe path error: {$path} ({$e->getMessage()})");
+                }
             }
-            retranscribe_vault($path, $state);
             save_state($state);
+            if ($pathErrors !== []) {
+                throw new RuntimeException('retranscribe_failed_paths=' . count($pathErrors));
+            }
+            return;
+        }
+
+        if ($cmd === 'repair-note-dates') {
+            $paths = retranscribe_paths_from_args($args);
+            $pathErrors = [];
+            foreach ($paths as $path) {
+                try {
+                    repair_note_dates($path);
+                } catch (Throwable $e) {
+                    $pathErrors[] = ['path' => $path, 'error' => $e->getMessage()];
+                    log_line('repair_note_dates_path_error', ['path' => $path, 'error' => $e->getMessage()]);
+                    cli_out("Repair date path error: {$path} ({$e->getMessage()})");
+                }
+            }
+            if ($pathErrors !== []) {
+                throw new RuntimeException('repair_note_dates_failed_paths=' . count($pathErrors));
+            }
+            return;
+        }
+
+        if ($cmd === 'retime-note-filenames') {
+            $paths = retranscribe_paths_from_args($args);
+            $pathErrors = [];
+            foreach ($paths as $path) {
+                try {
+                    retime_note_filenames($path, cli_is_dry_run());
+                } catch (Throwable $e) {
+                    $pathErrors[] = ['path' => $path, 'error' => $e->getMessage()];
+                    log_line('retime_note_filenames_path_error', ['path' => $path, 'error' => $e->getMessage()]);
+                    cli_out("Retime path error: {$path} ({$e->getMessage()})");
+                }
+            }
+            if ($pathErrors !== []) {
+                throw new RuntimeException('retime_note_filenames_failed_paths=' . count($pathErrors));
+            }
             return;
         }
 
@@ -518,6 +565,21 @@ function retranscribe_vault(string $path, array &$state): void {
     cli_out("Retranscribe complete: ok={$ok} error={$err}");
 }
 
+function retranscribe_paths_from_args(array $args): array {
+    $raw = array_slice($args, 1);
+    $paths = [];
+    foreach ($raw as $path) {
+        $path = trim((string)$path);
+        if ($path !== '') {
+            $paths[] = $path;
+        }
+    }
+    if ($paths === []) {
+        return [TARGET_DIRECTORY];
+    }
+    return array_values(array_unique($paths));
+}
+
 function discover_markdown_notes(string $path): array {
     $p = new SplFileInfo($path);
     if (!$p->isFile() && !$p->isDir()) {
@@ -593,8 +655,165 @@ function retranscribe_note_file(string $noteFile, array &$state): void {
 }
 
 function infer_audio_start_time(string $audioFile): int {
+    $nameTs = audio_timestamp_from_path($audioFile);
+    if ($nameTs > 0) {
+        return $nameTs;
+    }
+
     $duration = audio_duration_seconds($audioFile);
+    $captureTs = audio_capture_timestamp($audioFile);
+    if ($captureTs > 0) {
+        return max(0, $captureTs - (int)round($duration));
+    }
     return max(0, (filemtime($audioFile) ?: time()) - (int)round($duration));
+}
+
+function repair_note_dates(string $path): void {
+    $notes = discover_markdown_notes($path);
+    if ($notes === []) {
+        log_line('repair_note_dates_no_notes', ['path' => $path]);
+        cli_out("No markdown notes found under {$path}");
+        return;
+    }
+
+    $total = count($notes);
+    $updated = 0;
+    $unchanged = 0;
+    $errors = 0;
+    cli_out("Repairing dates for {$total} note(s) from {$path}");
+
+    foreach ($notes as $idx => $noteFile) {
+        $n = $idx + 1;
+        cli_out(sprintf("[%d/%d] checking %s", $n, $total, basename($noteFile)));
+        try {
+            $contents = (string)file_get_contents($noteFile);
+            $audioLink = extract_audio_link($contents);
+            if ($audioLink === '') {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged: no audio link", $n, $total));
+                continue;
+            }
+
+            $audioPath = resolve_audio_link_path($audioLink);
+            if (!is_file($audioPath)) {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged: missing audio", $n, $total));
+                continue;
+            }
+
+            $ts = infer_audio_start_time($audioPath);
+            if ($ts <= 0) {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged: no timestamp", $n, $total));
+                continue;
+            }
+
+            $currentStem = pathinfo($noteFile, PATHINFO_FILENAME);
+            $currentTitle = (string)(preg_replace('/^\d{1,2}\s+/', '', $currentStem) ?? $currentStem);
+            $renamedPath = maybe_rename_note_to_title($noteFile, $currentTitle, $ts);
+            if ($renamedPath === $noteFile) {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged", $n, $total));
+                continue;
+            }
+
+            $updated++;
+            log_line('repair_note_dates_renamed', [
+                'from' => $noteFile,
+                'to' => $renamedPath,
+                'audio' => $audioPath,
+                'audio_start_ts' => $ts,
+            ]);
+            cli_out(sprintf("[%d/%d] updated -> %s", $n, $total, basename($renamedPath)));
+        } catch (Throwable $e) {
+            $errors++;
+            log_line('repair_note_dates_error', ['note' => $noteFile, 'error' => $e->getMessage()]);
+            cli_out(sprintf("[%d/%d] error: %s", $n, $total, $e->getMessage()));
+        }
+    }
+
+    cli_out("Repair-date complete: updated={$updated} unchanged={$unchanged} error={$errors}");
+}
+
+function retime_note_filenames(string $path, bool $dryRun = false): void {
+    $notes = discover_markdown_notes($path);
+    if ($notes === []) {
+        log_line('retime_note_filenames_no_notes', ['path' => $path]);
+        cli_out("No markdown notes found under {$path}");
+        return;
+    }
+
+    $total = count($notes);
+    $updated = 0;
+    $unchanged = 0;
+    $errors = 0;
+    $mode = $dryRun ? 'DRY RUN' : 'APPLY';
+    cli_out("Retiming filenames ({$mode}) for {$total} note(s) from {$path}");
+
+    foreach ($notes as $idx => $noteFile) {
+        $n = $idx + 1;
+        cli_out(sprintf("[%d/%d] checking: %s", $n, $total, basename($noteFile)));
+        try {
+            $contents = (string)file_get_contents($noteFile);
+            $audioLink = extract_audio_link($contents);
+            if ($audioLink === '') {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged: no audio link", $n, $total));
+                continue;
+            }
+
+            $audioPath = resolve_audio_link_path($audioLink);
+            if (!is_file($audioPath)) {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged: missing audio", $n, $total));
+                continue;
+            }
+
+            $ts = infer_audio_start_time($audioPath);
+            if ($ts <= 0) {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged: no timestamp", $n, $total));
+                continue;
+            }
+
+            $currentStem = pathinfo($noteFile, PATHINFO_FILENAME);
+            $titlePart = note_title_without_prefixes($currentStem);
+            $targetStem = format_note_title_with_time($titlePart, $ts);
+            if ($targetStem === '') {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged: empty target", $n, $total));
+                continue;
+            }
+
+            $renamedPath = maybe_rename_note_to_stem($noteFile, $targetStem, $dryRun);
+            if ($renamedPath === $noteFile) {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged", $n, $total));
+                continue;
+            }
+
+            $updated++;
+            if ($dryRun) {
+                cli_out(sprintf("[%d/%d] new name: %s", $n, $total, basename($renamedPath)));
+            } else {
+                cli_out(sprintf("[%d/%d] updated -> %s", $n, $total, basename($renamedPath)));
+            }
+            log_line('retime_note_filename', [
+                'dry_run' => $dryRun,
+                'from' => $noteFile,
+                'to' => $renamedPath,
+                'audio' => $audioPath,
+                'audio_start_ts' => $ts,
+            ]);
+        } catch (Throwable $e) {
+            $errors++;
+            log_line('retime_note_filename_error', ['note' => $noteFile, 'error' => $e->getMessage()]);
+            cli_out(sprintf("[%d/%d] error: %s", $n, $total, $e->getMessage()));
+        }
+    }
+
+    $label = $dryRun ? 'Retime dry-run complete' : 'Retime complete';
+    cli_out("{$label}: updated={$updated} unchanged={$unchanged} error={$errors}");
 }
 
 function maybe_rename_note_to_title(string $noteFile, string $title, int $audioStartTs): string {
@@ -602,15 +821,18 @@ function maybe_rename_note_to_title(string $noteFile, string $title, int $audioS
     if ($safeTitle === '') {
         return $noteFile;
     }
+    return maybe_rename_note_to_stem($noteFile, $safeTitle, false);
+}
 
+function maybe_rename_note_to_stem(string $noteFile, string $targetStem, bool $dryRun = false): string {
     $dir = dirname($noteFile);
-    $target = $dir . '/' . $safeTitle . '.md';
+    $target = $dir . '/' . $targetStem . '.md';
     if ($target === $noteFile) {
         return $noteFile;
     }
 
     if (file_exists($target)) {
-        $base = $dir . '/' . $safeTitle;
+        $base = $dir . '/' . $targetStem;
         $i = 2;
         while (file_exists($base . ' ' . $i . '.md')) {
             $i++;
@@ -618,8 +840,17 @@ function maybe_rename_note_to_title(string $noteFile, string $title, int $audioS
         $target = $base . ' ' . $i . '.md';
     }
 
-    if (!rename($noteFile, $target)) {
-        throw new RuntimeException("rename_failed: {$noteFile} -> {$target}");
+    if ($dryRun) {
+        return $target;
+    }
+
+    if (!@rename($noteFile, $target)) {
+        $err = error_get_last();
+        $msg = is_array($err) ? (string)($err['message'] ?? '') : '';
+        if ($msg === '') {
+            $msg = 'rename_failed';
+        }
+        throw new RuntimeException("rename_failed: {$noteFile} -> {$target} ({$msg})");
     }
     return $target;
 }
@@ -1068,14 +1299,43 @@ function normalize_title_phrase(string $text): string {
 
 function format_note_title(string $title, int $audioStartTs): string {
     $phrase = normalize_title_phrase($title);
-    // If model returns a day prefix, replace with canonical day from audio timestamp.
-    $phrase = preg_replace('/^\d{1,2}\s+/', '', $phrase) ?? $phrase;
+    // If model returns day/time prefixes, replace with canonical values from audio timestamp.
+    $phrase = preg_replace('/^\d{1,2}\s+(?:\d{4}\s+)?/', '', $phrase) ?? $phrase;
     $phrase = trim($phrase);
     if ($phrase === '') {
         $phrase = base_name_from_timestamp($audioStartTs);
     }
 
-    return date('d', $audioStartTs) . ' ' . $phrase;
+    return date('d', $audioStartTs) . ' ' . date('Hi', $audioStartTs) . ' ' . $phrase;
+}
+
+function format_note_title_with_time(string $title, int $audioStartTs): string {
+    $phrase = sanitize_existing_note_title($title);
+    // If model/file already contains a day/time prefix, replace with canonical values from audio timestamp.
+    $phrase = preg_replace('/^\d{1,2}\s+(?:\d{4}\s+)?/', '', $phrase) ?? $phrase;
+    $phrase = trim($phrase);
+    if ($phrase === '') {
+        $phrase = base_name_from_timestamp($audioStartTs);
+    }
+
+    return date('d', $audioStartTs) . ' ' . date('Hi', $audioStartTs) . ' ' . $phrase;
+}
+
+function note_title_without_prefixes(string $stem): string {
+    $title = preg_replace('/^\d{1,2}\s+(?:\d{4}\s+)?/', '', $stem) ?? $stem;
+    $title = trim((string)$title);
+    if ($title === '') {
+        return $stem;
+    }
+    return $title;
+}
+
+function sanitize_existing_note_title(string $title): string {
+    $text = trim($title);
+    // Keep '-' and '_' from existing filenames; only strip filesystem-invalid chars.
+    $text = preg_replace('/[\/:*?"<>|]/', ' ', $text) ?? $text;
+    $text = preg_replace('/\s+/', ' ', $text) ?? $text;
+    return trim($text, '. ');
 }
 
 function build_md_path(string $title, int $audioStartTs): string {
@@ -1279,6 +1539,10 @@ function cli_args_without_flags(array $argv): array {
             $GLOBALS['ophaniel_quiet'] = true;
             continue;
         }
+        if ($arg === '--dry-run') {
+            $GLOBALS['ophaniel_dry_run'] = true;
+            continue;
+        }
         $out[] = (string)$arg;
     }
     return $out;
@@ -1286,6 +1550,10 @@ function cli_args_without_flags(array $argv): array {
 
 function cli_is_quiet(): bool {
     return (bool)($GLOBALS['ophaniel_quiet'] ?? false);
+}
+
+function cli_is_dry_run(): bool {
+    return (bool)($GLOBALS['ophaniel_dry_run'] ?? false);
 }
 
 function cli_out(string $message): void {
@@ -1636,6 +1904,17 @@ function source_path_timestamp_guess(string $file): int {
         return 0;
     }
     return (int)$ts;
+}
+
+function audio_timestamp_from_path(string $file): int {
+    // Obsidian copied audio: YYYY-MM-DD at HHMM(.m4a), with optional de-dupe suffix.
+    if (preg_match('~/(\\d{4})-(\\d{2})-(\\d{2}) at (\\d{2})(\\d{2})(?:-\\d+)?\\.m4a$~i', $file, $m) === 1) {
+        $ts = @mktime((int)$m[4], (int)$m[5], 0, (int)$m[2], (int)$m[3], (int)$m[1]);
+        if ($ts !== false) {
+            return (int)$ts;
+        }
+    }
+    return source_path_timestamp_guess($file);
 }
 
 function ensure_source_audio_available(string $source): bool {

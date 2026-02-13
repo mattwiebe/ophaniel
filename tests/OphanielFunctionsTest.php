@@ -23,7 +23,7 @@ final class OphanielFunctionsTest extends TestCase {
     public function testFormatNoteTitlePrefixesDayAndRemovesExistingPrefix(): void {
         $ts = strtotime('2026-01-22 11:03:00');
         $title = format_note_title('02 weird_oldTitle', $ts);
-        $this->assertSame('22 weird old Title', $title);
+        $this->assertSame('22 1103 weird old Title', $title);
     }
 
     public function testDedupeRepetitionCollapsesImmediateRepeats(): void {

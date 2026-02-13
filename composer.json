@@ -14,7 +14,15 @@
     "launchagent:unload": "php scripts/launchagent.php unload",
     "launchagent:reload": "php scripts/launchagent.php reload",
     "launchagent:status": "php scripts/launchagent.php status",
-    "retranscribe-vault": "php ophaniel.php retranscribe-vault",
+    "retranscribe-vault": [
+      "Composer\\Config::disableProcessTimeout",
+      "php ophaniel.php retranscribe-vault"
+    ],
+    "repair-note-dates": "php ophaniel.php repair-note-dates",
+    "retime-note-filenames": [
+      "Composer\\Config::disableProcessTimeout",
+      "php ophaniel.php retime-note-filenames"
+    ],
     "test-file": "php ophaniel.php test-file",
     "test-llm": "php ophaniel.php test-llm",
     "test": "phpunit --colors=always"

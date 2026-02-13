@@ -68,6 +68,10 @@ Direct CLI remains available:
 
 - `php ophaniel.php process-file "/absolute/path/to/file.m4a"`
 - `php ophaniel.php retranscribe-vault "/path/to/vault/subdir-or-note.md"`
+- `php ophaniel.php retranscribe-vault "/path/one.md" "/path/two-or-dir"`
+- `php ophaniel.php repair-note-dates "/path/one-or-dir" "/path/two-or-dir"`
+- `php ophaniel.php retime-note-filenames "/path/or/vault/root" --dry-run`
+- `php ophaniel.php retime-note-filenames "/path/or/vault/root"`
 - `php ophaniel.php test-file "/path/to/file.m4a" /tmp/ophaniel-tests`
 
 ## Behavior Notes
@@ -77,6 +81,7 @@ Direct CLI remains available:
 - JSON state tracks processed files by path + mtime + size
 - Progress output includes `n/total` for `ingest` and `retranscribe-vault`
 - `--quiet` suppresses CLI progress output
+- Default note filename format: `DD HHMM Title.md`
 - Transcripts get heuristic paragraphization + repetition cleanup
 - Title + summary come from one LLM call (JSON response)
 
