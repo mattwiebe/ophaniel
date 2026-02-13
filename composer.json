@@ -23,6 +23,11 @@
       "Composer\\Config::disableProcessTimeout",
       "php ophaniel.php retime-note-filenames"
     ],
+    "refresh-heuristic-notes": [
+      "Composer\\Config::disableProcessTimeout",
+      "php ophaniel.php refresh-heuristic-notes"
+    ],
+    "timing-report": "php ophaniel.php timing-report",
     "test-file": "php ophaniel.php test-file",
     "test-llm": "php ophaniel.php test-llm",
     "test": "phpunit --colors=always"

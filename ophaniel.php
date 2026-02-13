@@ -13,6 +13,8 @@ declare(strict_types=1);
  *   /Users/matt/bin/transcribe/ophaniel.php retranscribe-vault [/absolute/path1 [/absolute/path2 ...]] [--quiet|-q]
  *   /Users/matt/bin/transcribe/ophaniel.php repair-note-dates [/absolute/path1 [/absolute/path2 ...]] [--quiet|-q]
  *   /Users/matt/bin/transcribe/ophaniel.php retime-note-filenames [/absolute/path1 [/absolute/path2 ...]] [--dry-run] [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php refresh-heuristic-notes [/absolute/path1 [/absolute/path2 ...]] [--dry-run] [--only-metadata] [--quiet|-q]
+ *   /Users/matt/bin/transcribe/ophaniel.php timing-report [audio_seconds]
  *   /Users/matt/bin/transcribe/ophaniel.php test-file /absolute/path/to/file.m4a [/tmp/outdir] [offset_ms] [duration_ms]
  *   /Users/matt/bin/transcribe/ophaniel.php test-llm /absolute/path/to/textfile
  *   /Users/matt/bin/transcribe/ophaniel.php status
@@ -47,6 +49,7 @@ define('LIGHTNING_LANGUAGE', cfg_string($bootConfig, 'LIGHTNING_LANGUAGE', 'en')
 
 define('FILE_SETTLE_SECONDS', cfg_int($bootConfig, 'FILE_SETTLE_SECONDS', 20));
 define('MAX_FILES_PER_RUN', max(1, cfg_int($bootConfig, 'MAX_FILES_PER_RUN', 3)));
+define('WATERMARK_STALE_SECONDS', max(300, cfg_int($bootConfig, 'WATERMARK_STALE_SECONDS', 86400)));
 define('ERROR_RETRY_SECONDS', max(60, cfg_int($bootConfig, 'ERROR_RETRY_SECONDS', 3600)));
 define('ERROR_MAX_ATTEMPTS', max(1, cfg_int($bootConfig, 'ERROR_MAX_ATTEMPTS', 3)));
 define('REPROCESS_ON_SOURCE_CHANGE', cfg_bool($bootConfig, 'REPROCESS_ON_SOURCE_CHANGE', false));
@@ -59,6 +62,9 @@ define('LMSTUDIO_BASE_URL', cfg_string($bootConfig, 'LMSTUDIO_BASE_URL', 'http:/
 define('LMSTUDIO_API_KEY', cfg_string($bootConfig, 'LMSTUDIO_API_KEY', 'lm-studio'));
 define('LMSTUDIO_TIMEOUT_SECONDS', max(10, cfg_int($bootConfig, 'LMSTUDIO_TIMEOUT_SECONDS', 120)));
 define('LMS_COMMAND_TIMEOUT_SECONDS', max(5, cfg_int($bootConfig, 'LMS_COMMAND_TIMEOUT_SECONDS', 25)));
+define('LLM_METADATA_MAX_CHARS', max(1000, cfg_int($bootConfig, 'LLM_METADATA_MAX_CHARS', 8000)));
+define('LLM_METADATA_CONTEXT_FRACTION', min(0.95, max(0.1, (float)cfg_raw($bootConfig, 'LLM_METADATA_CONTEXT_FRACTION') ?: 0.75)));
+define('LLM_METADATA_CHARS_PER_TOKEN', min(6.0, max(1.0, (float)cfg_raw($bootConfig, 'LLM_METADATA_CHARS_PER_TOKEN') ?: 3.0)));
 define('FFPROBE_COMMAND', cfg_string($bootConfig, 'FFPROBE_COMMAND', '/opt/homebrew/bin/ffprobe'));
 define('FFMPEG_COMMAND', cfg_string($bootConfig, 'FFMPEG_COMMAND', '/opt/homebrew/bin/ffmpeg'));
 define('HYDRATE_WAIT_SECONDS', max(1, cfg_int($bootConfig, 'HYDRATE_WAIT_SECONDS', 20)));
@@ -108,10 +114,16 @@ function main(array $argv): void {
         run_test_llm($file);
         return;
     }
+    if ($cmd === 'timing-report') {
+        $audioSeconds = max(0.0, (float)($args[1] ?? 0));
+        print_timing_report($audioSeconds);
+        return;
+    }
 
     with_lock(function () use ($cmd, $args): void {
         ensure_directories();
-        if (in_array($cmd, ['ingest', 'daemon', 'process-file', 'retranscribe-vault'], true)) {
+        if (in_array($cmd, ['ingest', 'daemon', 'process-file', 'retranscribe-vault'], true)
+            || ($cmd === 'refresh-heuristic-notes' && !cli_is_dry_run())) {
             ensure_llm_metadata_preflight();
         }
         $state = load_state();
@@ -201,6 +213,25 @@ function main(array $argv): void {
             }
             if ($pathErrors !== []) {
                 throw new RuntimeException('retime_note_filenames_failed_paths=' . count($pathErrors));
+            }
+            return;
+        }
+
+        if ($cmd === 'refresh-heuristic-notes') {
+            $paths = retranscribe_paths_from_args($args);
+            $pathErrors = [];
+            foreach ($paths as $path) {
+                try {
+                    refresh_heuristic_notes($path, $state, cli_is_dry_run(), cli_is_only_metadata());
+                } catch (Throwable $e) {
+                    $pathErrors[] = ['path' => $path, 'error' => $e->getMessage()];
+                    log_line('refresh_heuristic_notes_path_error', ['path' => $path, 'error' => $e->getMessage()]);
+                    cli_out("Heuristic refresh path error: {$path} ({$e->getMessage()})");
+                }
+            }
+            save_state($state);
+            if ($pathErrors !== []) {
+                throw new RuntimeException('refresh_heuristic_notes_failed_paths=' . count($pathErrors));
             }
             return;
         }
@@ -334,8 +365,10 @@ function evaluate_candidate(string $file, array $state): array {
 
     $meta = file_meta($file);
     $watermark = (int)($state['watermark_mtime'] ?? 0);
+    $fileMtime = (int)($meta['mtime'] ?? 0);
     $candidateTs = candidate_timestamp_for_queue($meta);
-    if (!isset($state['processed'][$file]) && $watermark > 0 && $candidateTs <= $watermark) {
+    $isStaleByWatermark = ($candidateTs > 0) && (($watermark - $candidateTs) >= WATERMARK_STALE_SECONDS);
+    if (!isset($state['processed'][$file]) && $watermark > 0 && $fileMtime > 0 && $fileMtime <= $watermark && $isStaleByWatermark) {
         return ['eligible' => false, 'status' => 'skipped_watermark', 'meta' => $meta];
     }
 
@@ -816,6 +849,250 @@ function retime_note_filenames(string $path, bool $dryRun = false): void {
     cli_out("{$label}: updated={$updated} unchanged={$unchanged} error={$errors}");
 }
 
+function refresh_heuristic_notes(string $path, array &$state, bool $dryRun = false, bool $onlyMetadata = false): void {
+    $notes = discover_markdown_notes($path);
+    if ($notes === []) {
+        log_line('refresh_heuristic_notes_no_notes', ['path' => $path]);
+        cli_out("No markdown notes found under {$path}");
+        return;
+    }
+
+    $total = count($notes);
+    $matched = 0;
+    $matchedMetadata = 0;
+    $matchedRetranscribe = 0;
+    $matchedRetranscribeAudioSeconds = 0.0;
+    $updated = 0;
+    $unchanged = 0;
+    $filtered = 0;
+    $errors = 0;
+    $mode = $dryRun ? 'DRY RUN' : 'APPLY';
+    $filterLabel = $onlyMetadata ? 'only-metadata' : 'all';
+    cli_out("Heuristic refresh ({$mode}, filter={$filterLabel}) for {$total} note(s) from {$path}");
+
+    foreach ($notes as $idx => $noteFile) {
+        $n = $idx + 1;
+        cli_out(sprintf("[%d/%d] checking: %s", $n, $total, basename($noteFile)));
+        try {
+            $plan = analyze_note_refresh_plan($noteFile);
+            if ($plan['action'] === 'none') {
+                $unchanged++;
+                cli_out(sprintf("[%d/%d] unchanged", $n, $total));
+                continue;
+            }
+            if ($onlyMetadata) {
+                if ($plan['action'] === 'retranscribe' && (bool)($plan['needs_metadata'] ?? false)) {
+                    $plan['action'] = 'metadata';
+                    $plan['reason'] = (string)($plan['metadata_reason'] ?? 'missing_metadata');
+                } elseif ($plan['action'] !== 'metadata') {
+                    $filtered++;
+                    cli_out(sprintf("[%d/%d] skipped: only-metadata filter", $n, $total));
+                    continue;
+                }
+            }
+
+            $matched++;
+            $reason = (string)($plan['reason'] ?? 'heuristic');
+            cli_out(sprintf("[%d/%d] action: %s (%s)", $n, $total, $plan['action'], $reason));
+            if ($plan['action'] === 'metadata') {
+                $matchedMetadata++;
+            } elseif ($plan['action'] === 'retranscribe') {
+                $matchedRetranscribe++;
+                $matchedRetranscribeAudioSeconds += (float)($plan['audio_duration_s'] ?? 0.0);
+            }
+
+            if ($dryRun) {
+                continue;
+            }
+
+            if ($plan['action'] === 'metadata') {
+                $renamedPath = refresh_note_metadata_only($noteFile, $state, $plan);
+                $updated++;
+                cli_out(sprintf("[%d/%d] updated -> %s", $n, $total, basename($renamedPath)));
+                continue;
+            }
+
+            if ($plan['action'] === 'retranscribe') {
+                retranscribe_note_file($noteFile, $state);
+                $updated++;
+                cli_out(sprintf("[%d/%d] retranscribed", $n, $total));
+                continue;
+            }
+
+            $unchanged++;
+        } catch (Throwable $e) {
+            $errors++;
+            log_line('refresh_heuristic_note_error', ['note' => $noteFile, 'error' => $e->getMessage()]);
+            cli_out(sprintf("[%d/%d] error: %s", $n, $total, $e->getMessage()));
+        }
+    }
+
+    $label = $dryRun ? 'Heuristic dry-run complete' : 'Heuristic refresh complete';
+    cli_out("{$label}: matched={$matched} (metadata={$matchedMetadata}, retranscribe={$matchedRetranscribe}) filtered={$filtered} updated={$updated} unchanged={$unchanged} error={$errors}");
+    if ($dryRun && $matchedRetranscribe > 0) {
+        $timing = load_timing_ratio_stats();
+        if ($timing !== null) {
+            $avgEta = $matchedRetranscribeAudioSeconds * $timing['avg_ratio'];
+            $p50Eta = $matchedRetranscribeAudioSeconds * $timing['p50_ratio'];
+            $p90Eta = $matchedRetranscribeAudioSeconds * $timing['p90_ratio'];
+            cli_out(
+                'Estimated retranscribe runtime from logs: '
+                . 'audio_s=' . round($matchedRetranscribeAudioSeconds, 1)
+                . ' eta_avg=' . format_duration_hms($avgEta)
+                . ' eta_p50=' . format_duration_hms($p50Eta)
+                . ' eta_p90=' . format_duration_hms($p90Eta)
+            );
+            if ($matchedMetadata > 0) {
+                cli_out("Note: metadata={$matchedMetadata} items are extra and not included in ETA.");
+            }
+        }
+    }
+}
+
+function analyze_note_refresh_plan(string $noteFile): array {
+    $contents = (string)file_get_contents($noteFile);
+    $audioLink = extract_audio_link($contents);
+    if ($audioLink === '') {
+        return ['action' => 'none', 'reason' => 'missing_audio_link'];
+    }
+
+    $audioPath = resolve_audio_link_path($audioLink);
+    if (!is_file($audioPath)) {
+        return ['action' => 'none', 'reason' => 'missing_audio_file'];
+    }
+
+    $transcript = extract_transcript_body($contents);
+    if ($transcript === '') {
+        return ['action' => 'none', 'reason' => 'missing_transcript_body'];
+    }
+
+    $stem = pathinfo($noteFile, PATHINFO_FILENAME);
+    $titlePart = note_title_without_prefixes($stem);
+    $titleLooksMissing = ($titlePart === '' || preg_match('/^\d+$/', $titlePart) === 1);
+    $summaryMissing = !note_has_summary($contents);
+
+    $flat = preg_replace('/\s+/', ' ', trim($transcript)) ?? '';
+    $dedupe = dedupe_repetition($flat);
+    $removed = (int)($dedupe['removed_tokens'] ?? 0);
+    $excessiveRepetition = $removed >= 20;
+
+    if ($excessiveRepetition) {
+        return [
+            'action' => 'retranscribe',
+            'reason' => "excessive_repetition_removed_tokens={$removed}",
+            'needs_metadata' => ($titleLooksMissing || $summaryMissing),
+            'metadata_reason' => metadata_reason_label($titleLooksMissing, $summaryMissing),
+            'audio_link' => $audioLink,
+            'audio_path' => $audioPath,
+            'audio_duration_s' => audio_duration_seconds($audioPath),
+            'transcript' => $transcript,
+        ];
+    }
+
+    if ($titleLooksMissing || $summaryMissing) {
+        $reasons = [];
+        if ($titleLooksMissing) {
+            $reasons[] = 'missing_title';
+        }
+        if ($summaryMissing) {
+            $reasons[] = 'missing_summary';
+        }
+        return [
+            'action' => 'metadata',
+            'reason' => implode('+', $reasons),
+            'needs_metadata' => true,
+            'metadata_reason' => implode('+', $reasons),
+            'audio_link' => $audioLink,
+            'audio_path' => $audioPath,
+            'transcript' => $transcript,
+        ];
+    }
+
+    return [
+        'action' => 'none',
+        'reason' => 'no_heuristic_match',
+        'needs_metadata' => false,
+        'metadata_reason' => '',
+    ];
+}
+
+function metadata_reason_label(bool $titleLooksMissing, bool $summaryMissing): string {
+    $reasons = [];
+    if ($titleLooksMissing) {
+        $reasons[] = 'missing_title';
+    }
+    if ($summaryMissing) {
+        $reasons[] = 'missing_summary';
+    }
+    return $reasons === [] ? 'missing_metadata' : implode('+', $reasons);
+}
+
+function refresh_note_metadata_only(string $noteFile, array &$state, array $plan): string {
+    $audioLink = (string)($plan['audio_link'] ?? '');
+    $audioPath = (string)($plan['audio_path'] ?? '');
+    $transcript = trim((string)($plan['transcript'] ?? ''));
+    if ($audioLink === '' || $audioPath === '' || $transcript === '') {
+        throw new RuntimeException('invalid_metadata_refresh_plan');
+    }
+
+    $audioStartTs = infer_audio_start_time($audioPath);
+    $llmMeta = build_llm_metadata($transcript, $audioStartTs);
+    $title = (string)($llmMeta['title'] ?? '');
+    $summary = (string)($llmMeta['summary'] ?? '');
+
+    $newBody = '';
+    if ($summary !== '') {
+        $newBody .= $summary . "\n\n-----\n\n";
+    }
+    $newBody .= '![[%s]]' . "\n\n";
+    $newBody = str_replace('%s', $audioLink, $newBody) . $transcript . "\n";
+    file_put_contents($noteFile, $newBody);
+
+    $renamedPath = maybe_rename_note_to_title($noteFile, $title, $audioStartTs);
+    $state['processed'][$renamedPath] = [
+        'mtime' => filemtime($renamedPath) ?: 0,
+        'size' => filesize($renamedPath) ?: 0,
+        'processed_at' => date('c'),
+        'engine' => selected_transcribe_backend(),
+        'kind' => 'heuristic_metadata_refresh',
+        'audio' => $audioPath,
+    ];
+    log_line('heuristic_metadata_refresh_ok', [
+        'note' => $renamedPath,
+        'audio' => $audioPath,
+    ]);
+    return $renamedPath;
+}
+
+function note_has_summary(string $contents): bool {
+    $parts = preg_split('/\n\s*-----\s*\n/', $contents, 2);
+    if (!is_array($parts) || count($parts) < 2) {
+        return false;
+    }
+    $summary = trim((string)$parts[0]);
+    if ($summary === '') {
+        return false;
+    }
+    if (preg_match('/^!\[\[[^\]]+\.m4a\]\]$/i', $summary) === 1) {
+        return false;
+    }
+    return strlen($summary) >= 20;
+}
+
+function extract_transcript_body(string $contents): string {
+    if (preg_match('/!\[\[[^\]]+\.m4a\]\]/i', $contents, $m, PREG_OFFSET_CAPTURE) !== 1) {
+        return '';
+    }
+    $match = $m[0][0];
+    $pos = (int)$m[0][1];
+    $start = $pos + strlen($match);
+    if ($start >= strlen($contents)) {
+        return '';
+    }
+    $body = trim((string)substr($contents, $start));
+    return $body;
+}
+
 function maybe_rename_note_to_title(string $noteFile, string $title, int $audioStartTs): string {
     $safeTitle = format_note_title($title, $audioStartTs);
     if ($safeTitle === '') {
@@ -1161,11 +1438,13 @@ function build_summary(string $text): string {
 
 function build_llm_metadata(string $text, int $audioStartTs): array {
     $fallbackTitle = fallback_title_from_text($text, $audioStartTs);
+    $fallbackSummary = fallback_summary_from_text($text);
     if (!ENABLE_LLM_SUMMARY) {
-        return ['title' => $fallbackTitle, 'summary' => ''];
+        return ['title' => $fallbackTitle, 'summary' => $fallbackSummary];
     }
     ensure_llm_metadata_preflight();
 
+    $promptText = llm_metadata_prompt_text($text);
     $prompt = "You create metadata for a voice memo transcript.\n"
         . "Return only compact JSON with this exact schema:\n"
         . "{\"title\":\"string\",\"summary\":\"string\"}\n"
@@ -1174,15 +1453,16 @@ function build_llm_metadata(string $text, int $audioStartTs): array {
         . "- title: natural phrase with spaces (no snake_case, no kebab-case, no CamelCase).\n"
         . "- summary: one terse paragraph.\n"
         . "- no markdown, no extra keys, no commentary.\n"
-        . "---\n{$text}\n---";
+        . "---\n{$promptText}\n---";
     $raw = query_llm($prompt);
     $parsed = parse_llm_metadata_json($raw);
     if ($parsed === null) {
         log_line('llm_metadata_parse_failed', [
             'model' => LLM_MODEL,
+            'input_chars' => strlen($promptText),
             'raw_excerpt' => substr($raw, 0, 280),
         ]);
-        return ['title' => $fallbackTitle, 'summary' => ''];
+        return ['title' => $fallbackTitle, 'summary' => $fallbackSummary];
     }
 
     $title = format_note_title((string)($parsed['title'] ?? ''), $audioStartTs);
@@ -1191,6 +1471,9 @@ function build_llm_metadata(string $text, int $audioStartTs): array {
     }
 
     $summary = trim((string)($parsed['summary'] ?? ''));
+    if ($summary === '') {
+        $summary = $fallbackSummary;
+    }
     return ['title' => $title, 'summary' => $summary];
 }
 
@@ -1228,6 +1511,61 @@ function fallback_title_from_text(string $text, int $audioStartTs): string {
     }
 
     return format_note_title($slug, $audioStartTs);
+}
+
+function fallback_summary_from_text(string $text): string {
+    $clean = trim((string)(preg_replace('/\s+/', ' ', $text) ?? $text));
+    if ($clean === '') {
+        return '';
+    }
+    if (strlen($clean) <= 280) {
+        return $clean;
+    }
+    return rtrim(substr($clean, 0, 277)) . '...';
+}
+
+function llm_metadata_prompt_text(string $text): string {
+    $clean = trim($text);
+    if ($clean === '') {
+        return $clean;
+    }
+    $charLimit = llm_metadata_char_limit();
+    if (strlen($clean) <= $charLimit) {
+        return $clean;
+    }
+    return rtrim(substr($clean, 0, $charLimit)) . "\n\n[Transcript truncated for metadata generation]";
+}
+
+function llm_metadata_char_limit(): int {
+    static $cached = null;
+    if (is_int($cached) && $cached > 0) {
+        return $cached;
+    }
+
+    $fallback = max(1000, LLM_METADATA_MAX_CHARS);
+    $model = lms_model_name_from_llm_model(LLM_MODEL);
+    if ($model === '') {
+        $cached = $fallback;
+        return $cached;
+    }
+
+    $ctxTokens = lmstudio_model_context_tokens($model);
+    if ($ctxTokens <= 0) {
+        $cached = $fallback;
+        return $cached;
+    }
+
+    $derived = (int)floor($ctxTokens * LLM_METADATA_CONTEXT_FRACTION * LLM_METADATA_CHARS_PER_TOKEN);
+    $cached = max(1000, $derived);
+    log_line('llm_metadata_char_limit', [
+        'model' => $model,
+        'context_tokens' => $ctxTokens,
+        'fraction' => LLM_METADATA_CONTEXT_FRACTION,
+        'chars_per_token' => LLM_METADATA_CHARS_PER_TOKEN,
+        'chars' => $cached,
+        'fallback_chars' => $fallback,
+    ]);
+    return $cached;
 }
 
 function query_llm(string $prompt): string {
@@ -1502,6 +1840,105 @@ function print_status(array $state): void {
     }
 }
 
+function print_timing_report(float $audioSeconds = 0.0): void {
+    $stats = load_timing_ratio_stats();
+    if ($stats === null) {
+        echo "No processed_ok timing entries found." . PHP_EOL;
+        return;
+    }
+    $avg = $stats['avg_ratio'];
+    $p50 = $stats['p50_ratio'];
+    $p90 = $stats['p90_ratio'];
+
+    echo "timing_samples=" . $stats['samples'] . PHP_EOL;
+    echo "avg_ratio=" . round($avg, 4) . " (" . round(1.0 / max(0.0001, $avg), 2) . "x realtime)" . PHP_EOL;
+    echo "p50_ratio=" . round($p50, 4) . " (" . round(1.0 / max(0.0001, $p50), 2) . "x realtime)" . PHP_EOL;
+    echo "p90_ratio=" . round($p90, 4) . " (" . round(1.0 / max(0.0001, $p90), 2) . "x realtime)" . PHP_EOL;
+
+    if ($audioSeconds > 0) {
+        $avgEta = $audioSeconds * $avg;
+        $p50Eta = $audioSeconds * $p50;
+        $p90Eta = $audioSeconds * $p90;
+        echo "estimate_for_audio_s=" . round($audioSeconds, 2) . PHP_EOL;
+        echo "eta_avg=" . format_duration_hms($avgEta) . PHP_EOL;
+        echo "eta_p50=" . format_duration_hms($p50Eta) . PHP_EOL;
+        echo "eta_p90=" . format_duration_hms($p90Eta) . PHP_EOL;
+    }
+}
+
+function load_timing_ratio_stats(): ?array {
+    if (!is_file(LOG_FILE)) {
+        return null;
+    }
+
+    $ratios = [];
+    $count = 0;
+    $fh = fopen(LOG_FILE, 'r');
+    if ($fh === false) {
+        throw new RuntimeException('timing_report_log_open_failed');
+    }
+    while (($line = fgets($fh)) !== false) {
+        $row = json_decode($line, true);
+        if (!is_array($row)) {
+            continue;
+        }
+        if (($row['event'] ?? '') !== 'processed_ok') {
+            continue;
+        }
+        $ctx = $row['ctx'] ?? null;
+        if (!is_array($ctx)) {
+            continue;
+        }
+        $elapsed = (float)($ctx['elapsed_s'] ?? 0);
+        $duration = (float)($ctx['duration_s'] ?? 0);
+        if ($elapsed <= 0 || $duration <= 0) {
+            continue;
+        }
+        $ratios[] = $elapsed / $duration;
+        $count++;
+    }
+    fclose($fh);
+
+    if ($ratios === []) {
+        return null;
+    }
+
+    sort($ratios, SORT_NUMERIC);
+    return [
+        'samples' => $count,
+        'avg_ratio' => array_sum($ratios) / count($ratios),
+        'p50_ratio' => percentile($ratios, 0.5),
+        'p90_ratio' => percentile($ratios, 0.9),
+    ];
+}
+
+function percentile(array $sortedValues, float $p): float {
+    if ($sortedValues === []) {
+        return 0.0;
+    }
+    $n = count($sortedValues);
+    if ($n === 1) {
+        return (float)$sortedValues[0];
+    }
+    $p = max(0.0, min(1.0, $p));
+    $idx = (int)round($p * ($n - 1));
+    return (float)$sortedValues[$idx];
+}
+
+function format_duration_hms(float $seconds): string {
+    $seconds = max(0, (int)round($seconds));
+    $h = intdiv($seconds, 3600);
+    $m = intdiv($seconds % 3600, 60);
+    $s = $seconds % 60;
+    if ($h > 0) {
+        return sprintf('%dh %dm %ds', $h, $m, $s);
+    }
+    if ($m > 0) {
+        return sprintf('%dm %ds', $m, $s);
+    }
+    return sprintf('%ds', $s);
+}
+
 function save_state(array $state): void {
     $json = json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     if ($json === false) {
@@ -1543,6 +1980,10 @@ function cli_args_without_flags(array $argv): array {
             $GLOBALS['ophaniel_dry_run'] = true;
             continue;
         }
+        if ($arg === '--only-metadata') {
+            $GLOBALS['ophaniel_only_metadata'] = true;
+            continue;
+        }
         $out[] = (string)$arg;
     }
     return $out;
@@ -1554,6 +1995,10 @@ function cli_is_quiet(): bool {
 
 function cli_is_dry_run(): bool {
     return (bool)($GLOBALS['ophaniel_dry_run'] ?? false);
+}
+
+function cli_is_only_metadata(): bool {
+    return (bool)($GLOBALS['ophaniel_only_metadata'] ?? false);
 }
 
 function cli_out(string $message): void {
@@ -1665,6 +2110,80 @@ function lmstudio_model_loaded(string $model): bool {
     }
 
     return stripos($raw, $model) !== false;
+}
+
+function lmstudio_model_context_tokens(string $model): int {
+    $res = run_lms_command(['ps', '--json'], LMS_COMMAND_TIMEOUT_SECONDS);
+    if ($res['timed_out']) {
+        return 0;
+    }
+
+    $raw = trim($res['stdout'] . "\n" . $res['stderr']);
+    if ($raw === '') {
+        return 0;
+    }
+    $parsed = json_decode($raw, true);
+    if (!is_array($parsed)) {
+        return 0;
+    }
+
+    $values = [];
+    collect_context_token_candidates_for_model($parsed, $model, $values);
+    if ($values !== []) {
+        return max($values);
+    }
+
+    $fallbackValues = [];
+    collect_context_token_candidates($parsed, $fallbackValues);
+    if ($fallbackValues === []) {
+        return 0;
+    }
+    return max($fallbackValues);
+}
+
+function collect_context_token_candidates_for_model(mixed $node, string $model, array &$out): void {
+    if (!is_array($node)) {
+        return;
+    }
+    if (node_mentions_model($node, $model)) {
+        collect_context_token_candidates($node, $out);
+    }
+    foreach ($node as $value) {
+        if (is_array($value)) {
+            collect_context_token_candidates_for_model($value, $model, $out);
+        }
+    }
+}
+
+function node_mentions_model(array $node, string $model): bool {
+    $json = json_encode($node, JSON_UNESCAPED_SLASHES);
+    if (!is_string($json)) {
+        return false;
+    }
+    return stripos($json, $model) !== false;
+}
+
+function collect_context_token_candidates(mixed $node, array &$out): void {
+    if (!is_array($node)) {
+        return;
+    }
+    foreach ($node as $key => $value) {
+        if (is_array($value)) {
+            collect_context_token_candidates($value, $out);
+            continue;
+        }
+        if (!is_numeric($value)) {
+            continue;
+        }
+        $k = strtolower((string)$key);
+        if (!str_contains($k, 'ctx') && !str_contains($k, 'context') && !str_contains($k, 'token')) {
+            continue;
+        }
+        $n = (int)$value;
+        if ($n >= 512 && $n <= 1048576) {
+            $out[] = $n;
+        }
+    }
 }
 
 function run_lms_command(array $args, int $timeoutSeconds): array {

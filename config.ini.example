@@ -36,3 +36,9 @@ LMS_COMMAND = "/Users/you/.cache/lm-studio/bin/lms"
 LMSTUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
 LMSTUDIO_API_KEY = "lm-studio"
 LMSTUDIO_TIMEOUT_SECONDS = 120
+; Metadata prompt sizing:
+; If lms reports model context, cap chars at context * LLM_METADATA_CONTEXT_FRACTION * LLM_METADATA_CHARS_PER_TOKEN.
+; Falls back to LLM_METADATA_MAX_CHARS when context cannot be detected.
+LLM_METADATA_MAX_CHARS = 8000
+LLM_METADATA_CONTEXT_FRACTION = 0.75
+LLM_METADATA_CHARS_PER_TOKEN = 3.0

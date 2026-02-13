@@ -49,6 +49,8 @@ If you want a different config file location:
 
 - `OPHANIEL_CONFIG=/path/to/config.ini php ophaniel.php ingest`
 
+Metadata prompt sizing defaults to a dynamic cap from `lms ps` context (`~75%` of context, converted to chars), with `LLM_METADATA_MAX_CHARS` as fallback.
+
 ## Commands
 
 Preferred: run via Composer scripts from this directory (`/Users/matt/bin/transcribe`).
@@ -72,6 +74,11 @@ Direct CLI remains available:
 - `php ophaniel.php repair-note-dates "/path/one-or-dir" "/path/two-or-dir"`
 - `php ophaniel.php retime-note-filenames "/path/or/vault/root" --dry-run`
 - `php ophaniel.php retime-note-filenames "/path/or/vault/root"`
+- `php ophaniel.php refresh-heuristic-notes "/path/or/vault/root" --dry-run`
+- `php ophaniel.php refresh-heuristic-notes "/path/or/vault/root" --dry-run --only-metadata`
+- `php ophaniel.php refresh-heuristic-notes "/path/or/vault/root"`
+- `php ophaniel.php timing-report`
+- `php ophaniel.php timing-report 1800` (estimate for 30m audio)
 - `php ophaniel.php test-file "/path/to/file.m4a" /tmp/ophaniel-tests`
 
 ## Behavior Notes
