@@ -24,6 +24,10 @@ LIGHTNING_LANGUAGE = "en"
 ; Pipeline behavior
 FILE_SETTLE_SECONDS = 20
 TEST_OUTPUT_ROOT = "/tmp/transcribe-tests"
+FFPROBE_COMMAND = "/opt/homebrew/bin/ffprobe"
+FFMPEG_COMMAND = "/opt/homebrew/bin/ffmpeg"
+HYDRATE_WAIT_SECONDS = 20
+HYDRATE_POLL_MS = 500
 
 ; Local LLM metadata generation
 ENABLE_LLM_SUMMARY = true

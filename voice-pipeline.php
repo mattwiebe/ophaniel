@@ -17,6 +17,7 @@ declare(strict_types=1);
  */
 
 $bootConfig = load_ini_config();
+@chdir(__DIR__);
 
 $defaultSourceDir = '/Users/matt/Library/Mobile Documents/iCloud~com~openplanetsoftware~just-press-record/Documents';
 $defaultTargetDir = '/Users/matt/Library/Mobile Documents/iCloud~md~obsidian/Documents/Matthew Brain/Voice Memos';
@@ -43,6 +44,10 @@ define('LIGHTNING_BATCH_SIZE', cfg_int($bootConfig, 'LIGHTNING_BATCH_SIZE', 1));
 define('LIGHTNING_LANGUAGE', cfg_string($bootConfig, 'LIGHTNING_LANGUAGE', 'en'));
 
 define('FILE_SETTLE_SECONDS', cfg_int($bootConfig, 'FILE_SETTLE_SECONDS', 20));
+define('MAX_FILES_PER_RUN', max(1, cfg_int($bootConfig, 'MAX_FILES_PER_RUN', 3)));
+define('ERROR_RETRY_SECONDS', max(60, cfg_int($bootConfig, 'ERROR_RETRY_SECONDS', 3600)));
+define('ERROR_MAX_ATTEMPTS', max(1, cfg_int($bootConfig, 'ERROR_MAX_ATTEMPTS', 3)));
+define('REPROCESS_ON_SOURCE_CHANGE', cfg_bool($bootConfig, 'REPROCESS_ON_SOURCE_CHANGE', false));
 define('TEST_OUTPUT_ROOT', cfg_string($bootConfig, 'TEST_OUTPUT_ROOT', '/tmp/transcribe-tests'));
 
 define('ENABLE_LLM_SUMMARY', cfg_bool($bootConfig, 'ENABLE_LLM_SUMMARY', true));
@@ -51,6 +56,11 @@ define('LMS_COMMAND', cfg_string($bootConfig, 'LMS_COMMAND', '/Users/matt/.cache
 define('LMSTUDIO_BASE_URL', cfg_string($bootConfig, 'LMSTUDIO_BASE_URL', 'http://127.0.0.1:1234/v1'));
 define('LMSTUDIO_API_KEY', cfg_string($bootConfig, 'LMSTUDIO_API_KEY', 'lm-studio'));
 define('LMSTUDIO_TIMEOUT_SECONDS', max(10, cfg_int($bootConfig, 'LMSTUDIO_TIMEOUT_SECONDS', 120)));
+define('LMS_COMMAND_TIMEOUT_SECONDS', max(5, cfg_int($bootConfig, 'LMS_COMMAND_TIMEOUT_SECONDS', 25)));
+define('FFPROBE_COMMAND', cfg_string($bootConfig, 'FFPROBE_COMMAND', '/opt/homebrew/bin/ffprobe'));
+define('FFMPEG_COMMAND', cfg_string($bootConfig, 'FFMPEG_COMMAND', '/opt/homebrew/bin/ffmpeg'));
+define('HYDRATE_WAIT_SECONDS', max(1, cfg_int($bootConfig, 'HYDRATE_WAIT_SECONDS', 20)));
+define('HYDRATE_POLL_MS', max(100, cfg_int($bootConfig, 'HYDRATE_POLL_MS', 500)));
 
 if (!defined('OPHANIEL_DISABLE_MAIN') && should_run_main()) {
     main($argv);
@@ -69,6 +79,7 @@ function should_run_main(): bool {
 
 function main(array $argv): void {
     date_default_timezone_set(trim((string) shell_exec("/bin/ls -l /etc/localtime | /usr/bin/cut -d '/' -f 8,9")) ?: date_default_timezone_get());
+    ensure_runtime_environment();
 
     $args = cli_args_without_flags($argv);
     $cmd = $args[0] ?? 'run-once';
@@ -167,6 +178,7 @@ function ensure_directories(): void {
 
 function run_once(array &$state): void {
     $files = discover_m4a_files(SOURCE_DIRECTORY);
+    log_line('run_once_start', ['source_files' => count($files), 'max_files_per_run' => MAX_FILES_PER_RUN]);
     if ($files === []) {
         cli_out('No source audio files found.');
         return;
@@ -176,24 +188,43 @@ function run_once(array &$state): void {
     foreach ($files as $file) {
         $check = evaluate_candidate($file, $state);
         if ($check['eligible']) {
-            $pending[] = $file;
+            $meta = $check['meta'] ?? [];
+            $sortTs = (int)($meta['capture_ts'] ?? 0);
+            if ($sortTs <= 0) {
+                $sortTs = (int)($meta['birthtime'] ?? 0);
+            }
+            $pending[] = [
+                'file' => $file,
+                'sort_ts' => $sortTs,
+            ];
         }
     }
 
-    $total = count($pending);
-    if ($total === 0) {
+    $eligibleTotal = count($pending);
+    if ($eligibleTotal === 0) {
         cli_out('No new settled files to process.');
         $state['watermark_mtime'] = max((int)($state['watermark_mtime'] ?? 0), time());
         return;
     }
 
-    cli_out("Processing {$total} file(s)");
+    usort($pending, static function (array $a, array $b): int {
+        return $b['sort_ts'] <=> $a['sort_ts'];
+    });
+    $pending = array_slice($pending, 0, MAX_FILES_PER_RUN);
+    $total = count($pending);
+
+    cli_out("Processing {$total} file(s) (eligible={$eligibleTotal}, max_per_run=" . MAX_FILES_PER_RUN . ")");
     $ok = 0;
     $err = 0;
-    foreach ($pending as $idx => $file) {
+    $skipped = 0;
+    $statusCounts = [];
+    foreach ($pending as $idx => $item) {
+        $file = $item['file'];
         $n = $idx + 1;
         cli_out(sprintf("[%d/%d] processing %s", $n, $total, basename($file)));
         $result = process_candidate($file, $state);
+        $status = (string)($result['status'] ?? 'unknown');
+        $statusCounts[$status] = (int)($statusCounts[$status] ?? 0) + 1;
         if ($result['status'] === 'processed_ok') {
             $ok++;
             cli_out(sprintf("[%d/%d] ok", $n, $total));
@@ -206,9 +237,19 @@ function run_once(array &$state): void {
             continue;
         }
 
+        $skipped++;
         cli_out(sprintf("[%d/%d] skipped: %s", $n, $total, $result['status'] ?? 'unknown'));
     }
     cli_out("Run complete: ok={$ok} error={$err}");
+    log_line('run_once_complete', [
+        'source_files' => count($files),
+        'eligible' => $eligibleTotal,
+        'attempted' => $total,
+        'processed_ok' => $ok,
+        'processed_error' => $err,
+        'skipped' => $skipped,
+        'status_counts' => $statusCounts,
+    ]);
 
     $state['watermark_mtime'] = max((int)($state['watermark_mtime'] ?? 0), time());
 }
@@ -246,16 +287,19 @@ function evaluate_candidate(string $file, array $state): array {
 
     $meta = file_meta($file);
     $watermark = (int)($state['watermark_mtime'] ?? 0);
-    if (!isset($state['processed'][$file]) && $watermark > 0 && $meta['mtime'] <= $watermark) {
+    $candidateTs = candidate_timestamp_for_queue($meta);
+    if (!isset($state['processed'][$file]) && $watermark > 0 && $candidateTs <= $watermark) {
         return ['eligible' => false, 'status' => 'skipped_watermark', 'meta' => $meta];
     }
 
     if (!is_file_settled($file, $meta)) {
         return ['eligible' => false, 'status' => 'skipped_unsettled', 'meta' => $meta];
     }
-
     if (already_processed($file, $meta, $state)) {
         return ['eligible' => false, 'status' => 'skipped_already_processed', 'meta' => $meta];
+    }
+    if (recent_error_backoff($file, $meta, $state)) {
+        return ['eligible' => false, 'status' => 'skipped_recent_error', 'meta' => $meta];
     }
 
     return ['eligible' => true, 'status' => 'eligible', 'meta' => $meta];
@@ -269,8 +313,11 @@ function process_candidate(string $file, array &$state): array {
 
     $meta = $candidate['meta'];
     $startTs = microtime(true);
+    if (!ensure_source_audio_available($file)) {
+        return ['status' => 'skipped_unavailable'];
+    }
     try {
-        $output = process_file($file);
+        $output = process_file($file, $meta);
         $backend = selected_transcribe_backend();
         $state['processed'][$file] = [
             'mtime' => $meta['mtime'],
@@ -294,24 +341,22 @@ function process_candidate(string $file, array &$state): array {
         $state['errors'][$file] = [
             'mtime' => $meta['mtime'],
             'size' => $meta['size'],
+            'birthtime' => (int)($meta['birthtime'] ?? 0),
             'failed_at' => date('c'),
             'error' => $e->getMessage(),
+            'attempts' => (int)(($state['errors'][$file]['attempts'] ?? 0)) + 1,
         ];
         log_line('processed_error', ['source' => $file, 'error' => $e->getMessage()]);
         return ['status' => 'processed_error', 'error' => $e->getMessage()];
     }
 }
 
-function process_file(string $file): array {
+function process_file(string $file, ?array $meta = null): array {
     $duration = audio_duration_seconds($file);
-    $audioStartTime = max(0, filemtime($file) - (int)round($duration));
+    $audioStartTime = estimate_audio_start_time($file, $meta, $duration);
 
     $targetBase = base_name_from_timestamp($audioStartTime);
     [$targetBase, $targetAudioFile] = unique_audio_name($targetBase);
-
-    if (!copy($file, $targetAudioFile)) {
-        throw new RuntimeException("copy_failed: {$targetAudioFile}");
-    }
 
     $outputBase = TARGET_DIRECTORY . '/' . $targetBase;
     run_transcription_backend($file, $outputBase);
@@ -335,7 +380,19 @@ function process_file(string $file): array {
     if ($summary !== '') {
         $mdBody .= $summary . "\n\n-----\n\n";
     }
-    $mdBody .= '![[audio/' . basename($targetAudioFile) . "]]\n\n";
+    $copyErr = '';
+    $copyOk = copy_with_retry($file, $targetAudioFile, $copyErr);
+    if ($copyOk) {
+        $mdBody .= '![[audio/' . basename($targetAudioFile) . "]]\n\n";
+    } else {
+        $mdBody .= "_Audio copy deferred: source temporarily unavailable for read._\n\n";
+        log_line('audio_copy_deferred', [
+            'source' => $file,
+            'target_audio' => $targetAudioFile,
+            'error' => $copyErr !== '' ? $copyErr : 'unknown_copy_error',
+        ]);
+        @unlink($targetAudioFile);
+    }
     $mdBody .= $textContent . "\n";
 
     $mdFile = build_md_path($title, $audioStartTime);
@@ -349,7 +406,7 @@ function process_file(string $file): array {
 
     return [
         'md_file' => $mdFile,
-        'audio_file' => $targetAudioFile,
+        'audio_file' => $copyOk ? $targetAudioFile : '',
         'duration_s' => $duration,
         'dedupe_removed_tokens' => $dedupeInfo['removed_tokens'],
     ];
@@ -655,8 +712,39 @@ function run_or_throw(string $cmd, string $prefix): void {
     }
 }
 
+function copy_with_retry(string $source, string $dest, string &$error = '', int $attempts = 4): bool {
+    $attempts = max(1, $attempts);
+    $lastError = '';
+    for ($i = 1; $i <= $attempts; $i++) {
+        clearstatcache(true, $source);
+        hydrate_source_with_ffprobe($source);
+        @unlink($dest);
+        $copyErr = '';
+        if (copy_via_stream($source, $dest, $copyErr)) {
+            return true;
+        }
+        if ($copyErr !== '') {
+            $lastError = $copyErr;
+        }
+
+        if ($i < $attempts) {
+            usleep($i * 500000); // 0.5s, 1.0s, 1.5s...
+        }
+    }
+
+    if ($lastError !== '') {
+        log_line('copy_failed_retry_exhausted', ['source' => $source, 'dest' => $dest, 'error' => $lastError]);
+    }
+    $error = $lastError;
+    return false;
+}
+
 function audio_duration_seconds(string $file): float {
-    $cmd = sprintf('ffprobe -v quiet -show_entries format=duration -of csv=p=0 %s', escapeshellarg($file));
+    $ffprobe = FFPROBE_COMMAND;
+    if (!is_executable($ffprobe)) {
+        $ffprobe = 'ffprobe';
+    }
+    $cmd = sprintf('%s -v quiet -show_entries format=duration -of csv=p=0 %s 2>/dev/null', escapeshellarg($ffprobe), escapeshellarg($file));
     $out = trim((string)shell_exec($cmd));
     if ($out === '' || !is_numeric($out)) {
         return 0.0;
@@ -716,9 +804,9 @@ function paragraphize_text(string $text): string {
     $paragraphs = [];
     $current = [];
     $currentWords = 0;
-    $maxSentences = 4;
-    $minSentences = 2;
-    $maxWords = 110;
+    $maxSentences = 3;
+    $minSentences = 1;
+    $maxWords = 70;
 
     foreach ($sentences as $idx => $sentence) {
         $sentenceWords = word_count($sentence);
@@ -751,7 +839,12 @@ function paragraphize_text(string $text): string {
         return $text;
     }
 
-    return implode("\n\n", $paragraphs);
+    $out = implode("\n\n", $paragraphs);
+    if (strpos($out, "\n\n") === false && word_count($out) >= 45) {
+        return hard_wrap_paragraphs($out, 45);
+    }
+
+    return $out;
 }
 
 function split_sentences(string $text): array {
@@ -779,6 +872,20 @@ function split_sentences(string $text): array {
 
 function sentence_starts_new_thought(string $sentence): bool {
     return preg_match('/^(anyway|so|but|then|okay|ok|also|meanwhile|on the other hand)\b/i', ltrim($sentence)) === 1;
+}
+
+function hard_wrap_paragraphs(string $text, int $wordsPerParagraph): string {
+    $words = preg_split('/\s+/', trim($text)) ?: [];
+    $words = array_values(array_filter($words, static fn(string $w): bool => $w !== ''));
+    if ($words === []) {
+        return '';
+    }
+
+    $paras = [];
+    for ($i = 0; $i < count($words); $i += $wordsPerParagraph) {
+        $paras[] = implode(' ', array_slice($words, $i, $wordsPerParagraph));
+    }
+    return implode("\n\n", $paras);
 }
 
 function dedupe_repetition(string $text): array {
@@ -987,19 +1094,97 @@ function build_md_path(string $title, int $audioStartTs): string {
 }
 
 function file_meta(string $file): array {
+    $mtime = (int)(filemtime($file) ?: 0);
+    $size = (int)(filesize($file) ?: 0);
+    $captureTs = audio_capture_timestamp($file);
+    $birth = source_file_timestamp($file);
+    $pathTs = source_path_timestamp_guess($file);
     return [
-        'mtime' => filemtime($file) ?: 0,
-        'size' => filesize($file) ?: 0,
+        'mtime' => $mtime,
+        'size' => $size,
+        'birthtime' => $birth,
+        'capture_ts' => $captureTs,
+        'path_ts' => $pathTs,
     ];
+}
+
+function candidate_timestamp_for_queue(array $meta): int {
+    $capture = (int)($meta['capture_ts'] ?? 0);
+    if ($capture > 0) {
+        return $capture;
+    }
+    $pathTs = (int)($meta['path_ts'] ?? 0);
+    if ($pathTs > 0) {
+        return $pathTs;
+    }
+    $birth = (int)($meta['birthtime'] ?? 0);
+    if ($birth > 0) {
+        return $birth;
+    }
+    return (int)($meta['mtime'] ?? 0);
+}
+
+function estimate_audio_start_time(string $file, ?array $meta, float $duration): int {
+    $pathTs = (int)(($meta['path_ts'] ?? 0));
+    if ($pathTs <= 0) {
+        $pathTs = source_path_timestamp_guess($file);
+    }
+    if ($pathTs > 0) {
+        // Just Press Record file names encode start time.
+        return $pathTs;
+    }
+
+    $captureTs = (int)(($meta['capture_ts'] ?? 0));
+    if ($captureTs <= 0) {
+        $captureTs = audio_capture_timestamp($file);
+    }
+    if ($captureTs > 0) {
+        return max(0, $captureTs - (int)round($duration));
+    }
+
+    return max(0, source_file_timestamp($file) - (int)round($duration));
 }
 
 function already_processed(string $file, array $meta, array $state): bool {
     if (!isset($state['processed'][$file])) {
         return false;
     }
+    if (!REPROCESS_ON_SOURCE_CHANGE) {
+        return true;
+    }
     $prev = $state['processed'][$file];
     return (int)($prev['mtime'] ?? -1) === $meta['mtime']
         && (int)($prev['size'] ?? -1) === $meta['size'];
+}
+
+function recent_error_backoff(string $file, array $meta, array $state): bool {
+    $err = $state['errors'][$file] ?? null;
+    if (!is_array($err)) {
+        return false;
+    }
+
+    $failedAt = strtotime((string)($err['failed_at'] ?? ''));
+    if ($failedAt === false) {
+        return false;
+    }
+
+    $sameVersion = (int)($err['mtime'] ?? -1) === (int)$meta['mtime']
+        && (int)($err['size'] ?? -1) === (int)$meta['size'];
+    if (!$sameVersion) {
+        return false;
+    }
+
+    $attempts = (int)($err['attempts'] ?? 1);
+    if ($attempts >= ERROR_MAX_ATTEMPTS) {
+        return true;
+    }
+
+    // Do not back off fresh files; allow quick retries while they are actively syncing.
+    if ((int)$meta['mtime'] >= (time() - 7200)) {
+        return false;
+    }
+
+    return (time() - $failedAt) < ERROR_RETRY_SECONDS;
 }
 
 function is_file_settled(string $file, array $meta): bool {
@@ -1074,6 +1259,7 @@ function with_lock(callable $fn): void {
 
     if (!flock($lock, LOCK_EX | LOCK_NB)) {
         log_line('lock_busy', ['lock_file' => LOCK_FILE]);
+        cli_out('Another pipeline process is already running; exiting.');
         fclose($lock);
         return;
     }
@@ -1132,9 +1318,11 @@ function ensure_llm_metadata_preflight(): void {
         return;
     }
 
-    $loadCmd = sprintf('%s load %s -y 2>&1', escapeshellarg(LMS_COMMAND), escapeshellarg($lmsModel));
-    exec($loadCmd, $loadOut, $loadCode);
-    if ($loadCode !== 0 || !lmstudio_model_loaded($lmsModel)) {
+    $load = run_lms_command(['load', $lmsModel, '-y'], LMS_COMMAND_TIMEOUT_SECONDS);
+    if ($load['timed_out']) {
+        throw new RuntimeException("Failed to load model '{$lmsModel}' via 'lms load' (timed out). Please load it manually in LM Studio.");
+    }
+    if ($load['exit_code'] !== 0 || !lmstudio_model_loaded($lmsModel)) {
         throw new RuntimeException("Failed to load model '{$lmsModel}' via 'lms load'. Please load it manually in LM Studio.");
     }
 }
@@ -1191,8 +1379,11 @@ function lms_model_name_from_llm_model(string $model): string {
 }
 
 function lmstudio_model_loaded(string $model): bool {
-    $cmd = sprintf('%s ps --json 2>&1', escapeshellarg(LMS_COMMAND));
-    $raw = (string)shell_exec($cmd);
+    $res = run_lms_command(['ps', '--json'], LMS_COMMAND_TIMEOUT_SECONDS);
+    if ($res['timed_out']) {
+        return false;
+    }
+    $raw = trim($res['stdout'] . "\n" . $res['stderr']);
     if (trim($raw) === '') {
         return false;
     }
@@ -1206,6 +1397,273 @@ function lmstudio_model_loaded(string $model): bool {
     }
 
     return stripos($raw, $model) !== false;
+}
+
+function run_lms_command(array $args, int $timeoutSeconds): array {
+    $cmd = array_merge([LMS_COMMAND], $args);
+    $descriptors = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+    $proc = proc_open($cmd, $descriptors, $pipes);
+    if (!is_resource($proc)) {
+        return ['exit_code' => 127, 'stdout' => '', 'stderr' => 'proc_open_failed', 'timed_out' => false];
+    }
+
+    fclose($pipes[0]);
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+
+    $stdout = '';
+    $stderr = '';
+    $start = microtime(true);
+    $timedOut = false;
+
+    while (true) {
+        $status = proc_get_status($proc);
+        $running = (bool)($status['running'] ?? false);
+
+        $stdout .= stream_get_contents($pipes[1]) ?: '';
+        $stderr .= stream_get_contents($pipes[2]) ?: '';
+
+        if (!$running) {
+            break;
+        }
+        if ((microtime(true) - $start) > max(1, $timeoutSeconds)) {
+            $timedOut = true;
+            proc_terminate($proc, 9);
+            break;
+        }
+        usleep(100000);
+    }
+
+    $stdout .= stream_get_contents($pipes[1]) ?: '';
+    $stderr .= stream_get_contents($pipes[2]) ?: '';
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+
+    $exit = proc_close($proc);
+    if ($timedOut && $exit === 0) {
+        $exit = 124;
+    }
+
+    return [
+        'exit_code' => (int)$exit,
+        'stdout' => $stdout,
+        'stderr' => $stderr,
+        'timed_out' => $timedOut,
+    ];
+}
+
+function ensure_runtime_environment(): void {
+    $home = trim((string)getenv('HOME'));
+    if ($home === '' && function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
+        $pw = posix_getpwuid(posix_geteuid());
+        if (is_array($pw) && isset($pw['dir']) && is_string($pw['dir'])) {
+            $home = trim($pw['dir']);
+            if ($home !== '') {
+                putenv("HOME={$home}");
+            }
+        }
+    }
+
+    if ($home !== '') {
+        if ((string)getenv('XDG_CACHE_HOME') === '') {
+            putenv("XDG_CACHE_HOME={$home}/.cache");
+        }
+        if ((string)getenv('HF_HOME') === '') {
+            putenv("HF_HOME={$home}/.cache/huggingface");
+        }
+    }
+
+    $requiredPath = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+    $path = trim((string)getenv('PATH'));
+    if ($path === '') {
+        putenv("PATH={$requiredPath}");
+        return;
+    }
+    if (str_contains($path, '/opt/homebrew/bin')) {
+        return;
+    }
+    putenv("PATH={$requiredPath}:{$path}");
+}
+
+function copy_via_cp(string $source, string $dest): bool {
+    $cmd = sprintf('/bin/cp -f %s %s', escapeshellarg($source), escapeshellarg($dest));
+    exec($cmd, $out, $code);
+    return $code === 0 && is_file($dest);
+}
+
+function copy_via_stream(string $source, string $dest, string &$error = ''): bool {
+    $src = @fopen($source, 'rb');
+    if (!is_resource($src)) {
+        $error = 'fopen_source_failed';
+        return false;
+    }
+    $dst = @fopen($dest, 'wb');
+    if (!is_resource($dst)) {
+        fclose($src);
+        $error = 'fopen_dest_failed';
+        return false;
+    }
+
+    $ok = true;
+    while (!feof($src)) {
+        $readErr = '';
+        set_error_handler(static function (int $severity, string $message) use (&$readErr): bool {
+            $readErr = $message;
+            return true;
+        });
+        $chunk = fread($src, 1024 * 1024);
+        restore_error_handler();
+        if ($chunk === false) {
+            $ok = false;
+            $error = $readErr !== '' ? $readErr : 'fread_failed';
+            break;
+        }
+        if ($chunk === '') {
+            continue;
+        }
+        $written = fwrite($dst, $chunk);
+        if ($written === false || $written !== strlen($chunk)) {
+            $ok = false;
+            $error = 'fwrite_failed';
+            break;
+        }
+    }
+
+    fclose($src);
+    fflush($dst);
+    fclose($dst);
+
+    if (!$ok) {
+        @unlink($dest);
+        return false;
+    }
+    return is_file($dest) && filesize($dest) > 0;
+}
+
+function hydrate_source_with_ffprobe(string $source): void {
+    $ffprobe = FFPROBE_COMMAND;
+    if (!is_executable($ffprobe)) {
+        $ffprobe = 'ffprobe';
+    }
+    $cmd = sprintf(
+        '%s -v error -show_entries format=duration -of default=nk=1:nw=1 %s >/dev/null 2>&1',
+        escapeshellarg($ffprobe),
+        escapeshellarg($source)
+    );
+    exec($cmd, $out, $code);
+}
+
+function source_audio_available(string $source): bool {
+    return ffprobe_can_open($source) && ffmpeg_can_decode_probe($source);
+}
+
+function ffprobe_can_open(string $source): bool {
+    $ffprobe = FFPROBE_COMMAND;
+    if (!is_executable($ffprobe)) {
+        $ffprobe = 'ffprobe';
+    }
+    $cmd = sprintf(
+        '%s -v error -show_entries format=duration -of default=nk=1:nw=1 %s >/dev/null 2>&1',
+        escapeshellarg($ffprobe),
+        escapeshellarg($source)
+    );
+    exec($cmd, $out, $code);
+    return $code === 0;
+}
+
+function ffmpeg_can_decode_probe(string $source): bool {
+    $ffmpeg = FFMPEG_COMMAND;
+    if (!is_executable($ffmpeg)) {
+        $ffmpeg = 'ffmpeg';
+    }
+    $cmd = sprintf(
+        '%s -v error -nostdin -i %s -t 0.1 -f null - >/dev/null 2>&1',
+        escapeshellarg($ffmpeg),
+        escapeshellarg($source)
+    );
+    exec($cmd, $out, $code);
+    return $code === 0;
+}
+
+function source_file_timestamp(string $file): int {
+    $st = @stat($file);
+    if (is_array($st)) {
+        $birth = (int)($st['birthtime'] ?? 0);
+        if ($birth > 0) {
+            return $birth;
+        }
+    }
+    return (int)(filemtime($file) ?: time());
+}
+
+function audio_capture_timestamp(string $file): int {
+    $ffprobe = FFPROBE_COMMAND;
+    if (!is_executable($ffprobe)) {
+        $ffprobe = 'ffprobe';
+    }
+    $cmd = sprintf(
+        '%s -v quiet -show_entries format_tags=creation_time -of default=nk=1:nw=1 %s 2>/dev/null',
+        escapeshellarg($ffprobe),
+        escapeshellarg($file)
+    );
+    $out = trim((string)shell_exec($cmd));
+    if ($out === '') {
+        return 0;
+    }
+    $ts = strtotime($out);
+    if ($ts === false) {
+        return 0;
+    }
+    return (int)$ts;
+}
+
+function source_path_timestamp_guess(string $file): int {
+    if (preg_match('~/(\\d{4})-(\\d{2})-(\\d{2})/(\\d{2})-(\\d{2})-(\\d{2})\\.m4a$~', $file, $m) !== 1) {
+        return 0;
+    }
+    $year = (int)$m[1];
+    $month = (int)$m[2];
+    $day = (int)$m[3];
+    $hour = (int)$m[4];
+    $min = (int)$m[5];
+    $sec = (int)$m[6];
+    $ts = @mktime($hour, $min, $sec, $month, $day, $year);
+    if ($ts === false) {
+        return 0;
+    }
+    return (int)$ts;
+}
+
+function ensure_source_audio_available(string $source): bool {
+    if (source_audio_available($source)) {
+        return true;
+    }
+
+    request_cloud_download($source);
+    $deadline = microtime(true) + HYDRATE_WAIT_SECONDS;
+    while (microtime(true) < $deadline) {
+        if (source_audio_available($source)) {
+            return true;
+        }
+        usleep(HYDRATE_POLL_MS * 1000);
+    }
+    return false;
+}
+
+function request_cloud_download(string $source): void {
+    if (!str_contains($source, '/Library/Mobile Documents/')) {
+        return;
+    }
+    $brctl = '/usr/bin/brctl';
+    if (!is_executable($brctl)) {
+        return;
+    }
+    $cmd = sprintf('%s download %s >/dev/null 2>&1', escapeshellarg($brctl), escapeshellarg($source));
+    exec($cmd, $out, $code);
 }
 
 function log_line(string $event, array $ctx = []): void {

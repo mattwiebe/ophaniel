@@ -82,15 +82,24 @@ Direct CLI remains available:
 
 ## LaunchAgent
 
-Use `--quiet` in `ProgramArguments` for production background runs.
+Generate and manage the LaunchAgent from Composer so install paths are not hardcoded.
 
-Example:
+- Create plist in `~/Library/LaunchAgents`:
+  - `composer run launchagent:add`
+- Load:
+  - `composer run launchagent:load`
+- Unload:
+  - `composer run launchagent:unload`
+- Reload:
+  - `composer run launchagent:reload`
+- Status:
+  - `composer run launchagent:status`
 
-```xml
-<array>
-  <string>/opt/homebrew/bin/php</string>
-  <string>/Users/matt/bin/transcribe/voice-pipeline.php</string>
-  <string>run-once</string>
-  <string>--quiet</string>
-</array>
-```
+Generic command form:
+
+- `composer run launchagent -- <add|load|unload|reload|status|path>`
+
+Optional env overrides:
+
+- `OPHANIEL_LAUNCHAGENT_LABEL` (default: `com.mattwiebe.ophaniel`)
+- `OPHANIEL_LAUNCHAGENT_INTERVAL` in seconds (default: `300`)
